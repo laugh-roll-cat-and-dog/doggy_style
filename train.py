@@ -16,17 +16,71 @@ import numpy as np
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str,
-                    help='')
-parser.add_argument('-bf', choices=['t', 'f'], type=str,
+parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str, metavar="attention",
+                    help='attention module')
+parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
                     help='concat backbone feature maps to last feature maps')
-parser.add_argument('-o', type=str,
+parser.add_argument('-o', '--output', type=str, metavar="output",
                     help='output model filename')
-parser.add_argument('-p', choices=['n', 'coco', 'stand'], type=str,
+parser.add_argument('-p', '--pretrained', choices=['n', 'coco', 'stand'], type=str, metavar="pretrained",
                     help='pre-trained model')
+parser.add_argument('-e', '--epoch', type=int, metavar="epoch",
+                    help='number of epoch')
+parser.add_argument('-c', type=int, metavar="class",
+                    help='number of class')
 args = parser.parse_args()
-## Data
 
+## Data
+IMAGE_PATH = os.path.join('pet_biometric_challenge_2022', 'train', 'images')
+DATA_PATH = os.path.join('pet_biometric_challenge_2022', 'train')
+CSV_PATH = os.path.join(DATA_PATH, '4500up_dataset.csv')
+pretrained_model = "byol_res50.pt"
+output_model = "byol_coco_res50_arcsoft_network_b16_lr4e-4.pt"
+head = "byol_coco_arcsoft_arcface_b16_lr4e-4.pt"
+
+
+df = pd.read_csv(CSV_PATH)
+
+pairs = []
+
+for _, row in df.iterrows():
+    pairs.append((row['dog_id'], row['image']))
+
+train_pairs = pairs
+
+class SiameseDataset(Dataset):
+    def __init__(self, pairs, transform=None):
+        self.pairs = pairs
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        dog_id, image = self.pairs[idx]
+        
+        img1_full = os.path.join(IMAGE_PATH, image)
+
+        try:
+            img = Image.open(img1_full).convert("RGB")
+        except Exception as e:
+            raise RuntimeError(f"Error loading image: {img1_full} — {e}")
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, torch.tensor(dog_id, dtype=torch.int64)
+    
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ToTensor(),
+])
+
+train_dataset = SiameseDataset(train_pairs, train_transform)
+print(f"Train size: {len(train_dataset)}")
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
 
 ## NN
 #---DAM---
@@ -115,10 +169,10 @@ class DualAttentionModule(nn.Module):
 #---SAM---
 class Self_Attention(nn.Module):
     """ Self attention Layer"""
-    def __init__(self,in_dim,activation):
+    def __init__(self,in_dim,activation=None):
         super(Self_Attention,self).__init__()
         self.chanel_in = in_dim
-        self.activation = activation
+        # self.activation = activation
         
         self.query_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
         self.key_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
@@ -248,14 +302,86 @@ class BAM(nn.Module):
                 nowd_params += list(module.parameters())
         return wd_params, nowd_params
 
+#---AA SE block (1)---
+class ConvBNReLU(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0, dilation=1,
+                 groups=1):
+        super(ConvBNReLU, self).__init__()
+        self.conv_bn_relu = nn.Sequential(
+            nn.Conv2d(in_channel, out_channel, kernel_size, stride, padding, dilation, groups,
+                      False),
+            nn.BatchNorm2d(out_channel),
+            nn.ReLU(True))
+
+    def forward(self, x):
+        return self.conv_bn_relu(x)
+
+#---AA SE block (2) Cont'd---
+class FeatureFusionModule(nn.Module):
+    def __init__(self, in_chan, out_chan, *args, **kwargs):
+        super(FeatureFusionModule, self).__init__()
+        self.convblk = ConvBNReLU(in_chan, out_chan, kernel_size=1, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(out_chan,
+                out_chan//4,
+                kernel_size = 1,
+                stride = 1,
+                padding = 0,
+                bias = False)
+        self.conv2 = nn.Conv2d(out_chan//4,
+                out_chan,
+                kernel_size = 1,
+                stride = 1,
+                padding = 0,
+                bias = False)
+        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
+        #self.softmax = nn.Softmax()
+        self.init_weight()
+
+    def forward(self, fsp, fcp, cam, pam, x):
+        if args.attention == 'dsb':
+            fcat = torch.cat([fsp, fcp, cam, pam], dim=1)
+        else:
+            fcat = torch.cat([fsp, fcp], dim=1)
+        if args.bf == 't':
+            fcat = torch.cat([fcat, x], dim=1)
+        feat = self.convblk(fcat)
+        atten = F.avg_pool2d(feat, feat.size()[2:])
+        atten = self.conv1(atten)
+        atten = self.relu(atten)
+        atten = self.conv2(atten)
+        atten = self.sigmoid(atten)
+        #atten = self.softmax(atten)
+        feat_atten = torch.mul(feat, atten)
+        feat_out = feat_atten + feat
+        return feat_out
+
+    def init_weight(self):
+        for ly in self.children():
+            if isinstance(ly, nn.Conv2d):
+                nn.init.kaiming_normal_(ly.weight, a=1)
+                if not ly.bias is None: nn.init.constant_(ly.bias, 0)
+
+    def get_params(self):
+        wd_params, nowd_params = [], []
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+                wd_params.append(module.weight)
+                if not module.bias is None:
+                    nowd_params.append(module.bias)
+            elif isinstance(module, nn.BatchNorm2d):
+                nowd_params += list(module.parameters())
+        return wd_params, nowd_params
+
 #---Final NN---
 class Network(nn.Module):
     def __init__(self, embedding_dim=1024):
         super().__init__()
         resnet = models.resnet50()
-        if ...:
-                ...
-        # resnet.load_state_dict((torch.load(f"pet_biometric_challenge_2022/{pretrained_model}", map_location=torch.device('cuda'))))
+        if args.pretrained == 'coco':
+            resnet.load_state_dict((torch.load("byol_coco.pt", map_location=torch.device('cuda'))))
+        elif args.pretrained == 'stand':
+            resnet.load_state_dict((torch.load("byol_stand.pt", map_location=torch.device('cuda'))))
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
         self.extra_layers = nn.Sequential(
@@ -267,8 +393,21 @@ class Network(nn.Module):
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True)
         )
+        self.cam = ChannelAttentionModule()
+        self.pam = PositionAttentionModule(512)
         self.dam = DualAttentionModule(in_channels=512)  
-        self.gap = nn.AdaptiveAvgPool2d((1,1))           
+        self.gap = nn.AdaptiveAvgPool2d((1,1))
+
+        self.sam = Self_Attention(512)
+        self.bam = BAM(512)
+        in_chan = 0
+        if args.attention == 'sb':
+            in_chan = 1024
+        elif args.attention == 'dsb':
+            in_chan = 2048
+        if args.bf == 't':
+            in_chan += 512
+        self.orchesta = FeatureFusionModule(in_chan, 3*512)
 
         self.fc = nn.Linear(3*512, embedding_dim, bias=False)  
         self.bn = nn.BatchNorm1d(embedding_dim)
@@ -276,8 +415,12 @@ class Network(nn.Module):
     def embed(self, x):
         x = self.backbone(x)
         x = self.extra_layers(x)   
-        x = self.dam(x)                 
-        x = self.gap(x)                 
+        if args.attention == 'd':
+            x = self.dam(x)                 
+            x = self.gap(x)
+        else:
+            x = self.orchesta(self.sam(x), self.bam(x), self.cam(x), self.pam(x), x)
+            x = self.gap(x)
         x = x.view(x.size(0), -1)      
         x = self.fc(x)             
         x = self.bn(x)
@@ -365,6 +508,62 @@ class SoftTriple(nn.Module):
         else:
             return lossClassify
 
+## Scheduler
+def lr_lambda(epoch):
+    if epoch < args.epoch/2:
+        return 1.0
+    else:
+        return max(0.0, 1.0 - (epoch - (args.epoch/2)) / (args.epoch/2))
+
 ## Train
 def train():
-    ...
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = Network().to(device)
+    
+    if args.pretrained == 'coco' or args.pretrained == 'stand':
+        for param in model.backbone.parameters():
+            param.require_grad = False
+
+    arcface_loss = ArcFace(1024, args.c).to(device)
+
+    soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, args.c, 9).to(device)
+
+    ce_loss = nn.CrossEntropyLoss()
+
+    optimizer = Adam([{"params": model.parameters()},
+                    {"params": arcface_loss.parameters()},
+                    {"params": soft_triple_loss.parameters()}],
+                    lr=0.00035,
+                    betas=(0.5, 0.999))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    num_epochs = args.epoch
+
+    for epoch in range(num_epochs):
+        training_loss = 0
+        for i, (img, dog_id) in enumerate(train_loader):
+            img_set = Variable(img.to(device))
+            id_set = Variable(dog_id.to(device))
+
+            output = model(img_set)
+            logits = arcface_loss(output, id_set)
+            
+            loss_a = ce_loss(logits, id_set)
+            loss_s = soft_triple_loss(output, id_set)
+            loss = loss_s + loss_a
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            training_loss += loss.item()
+        print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {training_loss/len(train_loader):.4f}")
+            
+        scheduler.step()
+
+    torch.save(model.state_dict(), f"{args.output}.pt")
+    torch.save(arcface_loss.state_dict(), f"{args.output}_arcface.pt")
+    torch.save(soft_triple_loss.state_dict(), f"{args.output}_soft.pt")
+
+train()
