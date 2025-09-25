@@ -11,18 +11,7 @@ offline = 2x
 | standford dogs | DAM       | DAM + BB Feature Map |
 | Coco           | DAM       | DAM + BB Feature Map |
 
-# 2 ???
-
-| Pretrained     | Attention | Head                 |
-| -------------- | --------- | -------------------- |
-| -              | DAM       | CAM->Arc, SpAM->Soft |
-| -              | DAM       | CAM->Soft, SpAM->Arc |
-| standford dogs | DAM       | CAM->Soft, SpAM->Arc |
-| standford dogs | DAM       | CAM->Arc, SpAM->Soft |
-| Coco           | DAM       | CAM->Arc, SpAM->Soft |
-| Coco           | DAM       | CAM->Soft, SpAM->Arc |
-
-# 3
+# 2
 
 | Pretrained     | Attention | Last Feature Map |
 | -------------- | --------- | ---------------- |
@@ -33,7 +22,7 @@ offline = 2x
 | Coco           | SAM+BAM   | SAM+BAM          |
 | Coco           | SAM+BAM   | SAM+BAM+BB Feature Map          |
 
-# 4
+# 3
 
 | Pretrained     | Attention   | Last Feature Map           |
 | -------------- | ----------- | -------------------------- |

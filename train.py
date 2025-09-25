@@ -525,9 +525,9 @@ def train():
         for param in model.backbone.parameters():
             param.require_grad = False
 
-    arcface_loss = ArcFace(1024, args.c).to(device)
+    arcface_loss = ArcFace(1024, int(args.c)).to(device)
 
-    soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, args.c, 9).to(device)
+    soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 9).to(device)
 
     ce_loss = nn.CrossEntropyLoss()
 
@@ -546,6 +546,7 @@ def train():
         for i, (img, dog_id) in enumerate(train_loader):
             img_set = Variable(img.to(device))
             id_set = Variable(dog_id.to(device))
+            print(img_set[0])
 
             output = model(img_set)
             logits = arcface_loss(output, id_set)
