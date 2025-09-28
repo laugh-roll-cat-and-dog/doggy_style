@@ -3,4 +3,5 @@ python3 train.py -p n \
         -bf t \
         -e 100 \
         -o testing_data \
-        -c 1500
+        -c 118 \
+        -l as

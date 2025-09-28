@@ -1,7 +1,6 @@
-import os
 import pandas as pd
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 import torch
 import torch.nn as nn
@@ -10,25 +9,26 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn import init
 import math
-from torch.optim import Adam
-from torch.autograd import Variable
 import numpy as np
 import argparse
-from sklearn.metrics import accuracy_score
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str, metavar="attention",
                     help='attention module')
 parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
                     help='concat backbone feature maps to last feature maps')
-parser.add_argument('-o', '--output', type=str, metavar="output",
-                    help='output model filename')
-parser.add_argument('-p', '--pretrained', choices=['n', 'coco', 'stand'], type=str, metavar="pretrained",
-                    help='pre-trained model')
 parser.add_argument('-e', '--epoch', type=int, metavar="epoch",
                     help='number of epoch')
 parser.add_argument('-c', type=int, metavar="class",
                     help='number of class')
+parser.add_argument('-m', '--model', type=str, metavar="model",
+                    help=' model filename')
+parser.add_argument('-ah', '--arcface', type=str, metavar="arcface",
+                    help='arcface classifier head filename')
+parser.add_argument('-sh', '--softtriple', type=str, metavar="softtriple",
+                    help='softtriple classifier head filename')
+parser.add_argument('-o', '--output', type=str, metavar="output",
+                    help='output csv filename')
 parser.add_argument('-l', '--loss', choices=['a', 's', 'as'], type=str, metavar="loss",
                     help='loss function')
 args = parser.parse_args()
@@ -53,27 +53,14 @@ class DogDataset(Dataset):
         
         return image, label
 
-train_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
 val_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor(),
+    transforms.transformsoTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-train_dataset_1 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms)
-train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
-train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
-
 val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=6)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
 ## NN
 #---DAM---
@@ -371,10 +358,6 @@ class Network(nn.Module):
     def __init__(self, embedding_dim=1024):
         super().__init__()
         resnet = models.resnet50()
-        if args.pretrained == 'coco':
-            resnet.load_state_dict((torch.load("byol_coco.pt", map_location=torch.device('cuda'))))
-        elif args.pretrained == 'stand':
-            resnet.load_state_dict((torch.load("byol_stand.pt", map_location=torch.device('cuda'))))
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
         self.extra_layers = nn.Sequential(
@@ -410,9 +393,10 @@ class Network(nn.Module):
         x = self.extra_layers(x)   
         if args.attention == 'd':
             x = self.dam(x)                 
+            x = self.gap(x)
         else:
             x = self.orchesta(self.sam(x), self.bam(x), self.cam(x), self.pam(x), x)
-        x = self.gap(x)
+            x = self.gap(x)
         x = x.view(x.size(0), -1)      
         x = self.fc(x)             
         x = self.bn(x)
@@ -488,153 +472,61 @@ class SoftTriple(nn.Module):
         centers = F.normalize(self.fc, p=2, dim=0)
         simInd = input.matmul(centers)
         simStruc = simInd.reshape(-1, self.cN, self.K)
-        prob = F.softmax(simStruc * self.gamma, dim=2)
-        simClass = torch.sum(prob * simStruc, dim=2)
+        prob = F.softmax(simStruc*self.gamma, dim=2)
+        simClass = torch.sum(prob*simStruc, dim=2)
 
-        return self.la * simClass
+        return simClass 
 
-    def loss(self, logits, target):
-        marginM = torch.zeros_like(logits).to(logits.device)
-        marginM[torch.arange(0, marginM.shape[0]), target] = self.margin
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        lossClassify = F.cross_entropy(self.la*((logits/self.la)-marginM), target)
+model = Network()
+model.load_state_dict(torch.load(args.model), map_location=device)
+model.eval()
 
-        if self.tau > 0 and self.K > 1:
-            centers = F.normalize(self.fc, p=2, dim=0)
-            simCenter = centers.t().matmul(centers)
-            reg = torch.sum(torch.sqrt(2.0+1e-5-2.*simCenter[self.weight]))/(self.cN*self.K*(self.K-1.))
-            return lossClassify+self.tau*reg
-        else:
-            return lossClassify
+arcface, softtriple = None, None
+if 'a' in args.loss:
+    arcface = ArcFace(1024, int(args.c))
+    arcface.load_state_dict(torch.load(args.arcface), map_location=device)
+    arcface.eval()
 
-## Scheduler
-def lr_lambda(epoch):
-    if epoch < args.epoch/2:
-        return 1.0
-    else:
-        return max(0.0, 1.0 - (epoch - (args.epoch/2)) / (args.epoch/2))
+if 's' in args.loss:
+    softtriple = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 10)
+    softtriple.load_state_dict(torch.load(args.softtriple), map_location=device)
+    softtriple.eval()
 
-# Eval fn
-def evaluate(model, val_loader, arcface_loss, soft_triple_loss, ce_loss, device):
-    model.eval()
-    if arcface_loss is not None:
-        arcface_loss.eval()
-    if soft_triple_loss is not None:
-        soft_triple_loss.eval()
+result = []
 
-    val_loss = 0.0
-    all_preds, all_labels = [], []
+with torch.no_grad():
+    for (img, dog_id) in val_loader:
+        img, dog_id = img.to(device), dog_id.to(device)
+        emb = model(img)
 
-    with torch.no_grad():
-        for img, dog_id in val_loader:
-            img, dog_id = img.to(device), dog_id.to(device)
-            output = model(img)
+        if arcface is not None:
+            logits_a = arcface(emb, dog_id)
+            combined_logits += torch.softmax(logits_a, dim=1)
 
-            loss = 0.0
-            combined_logits = 0.0
+        if softtriple is not None:
+            logits_s = softtriple(emb)
+            combined_logits += torch.softmax(logits_s, dim=1)
 
-            if arcface_loss is not None:
-                logits_a = arcface_loss(output, dog_id)
-                #print("arcface logit:", sum(logits_a))
-                loss_a = ce_loss(logits_a, dog_id)
-                # print("arcface loss:", loss_a)
-                loss += loss_a
-                combined_logits += torch.softmax(logits_a, dim=1)
+        if arcface is not None and softtriple is not None:
+            combined_logits /= 2.0
 
-            if soft_triple_loss is not None:
-                logits_s = soft_triple_loss(output)
-                loss_s = soft_triple_loss.loss(logits_s, dog_id)
-                loss += loss_s
-                combined_logits += torch.softmax(logits_s, dim=1)
+        pred_prob = torch.softmax(combined_logits, dim=1)
+        top5_prob, top5_idx = torch.topk(pred_prob, k=5, dim=1)
 
-            if arcface_loss is not None and soft_triple_loss is not None:
-                combined_logits /= 2.0
+        for i in range(len(img)):
+            result.append((
+                dog_id[i].item(),
+                top5_idx[i][0].item(),
+                top5_idx[i][1].item(),
+                top5_idx[i][2].item(),
+                top5_idx[i][3].item(),
+                top5_idx[i][4].item()
+            ))
 
-            val_loss += loss.item()
+pred_df = pd.DataFrame(result, columns=[
+    'dog_id', 'top1', 'top2', 'top3', 'top4', 'top5'
+])
 
-            preds = torch.argmax(combined_logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(dog_id.cpu().numpy())
-
-    avg_loss = val_loss / len(val_loader)
-    acc = accuracy_score(all_labels, all_preds)
-
-    return avg_loss, acc
-
-## Train
-def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = Network().to(device)
-    
-    if args.pretrained == 'coco' or args.pretrained == 'stand':
-        for param in model.backbone.parameters():
-            param.requires_grad = False
-
-    arcface_loss, soft_triple_loss = None, None
-    if 'a' in args.loss:
-        arcface_loss = ArcFace(1024, int(args.c)).to(device)
-    if 's' in args.loss:
-        soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 4).to(device)
-
-    ce_loss = nn.CrossEntropyLoss()
-
-    param_groups = [{"params": model.parameters()}]
-    if arcface_loss is not None:
-        param_groups.append({"params": arcface_loss.parameters()})
-    if soft_triple_loss is not None:
-        param_groups.append({"params": soft_triple_loss.parameters()})
-    optimizer = Adam(param_groups, lr=0.00035, betas=(0.5, 0.999))
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    num_epochs = args.epoch
-
-    for epoch in range(num_epochs):
-        model.train()
-        if 'a' in args.loss:
-            arcface_loss.train()
-        if 's' in args.loss:
-            soft_triple_loss.train()
-        training_loss = 0
-        correct, total = 0, 0
-
-        for img, dog_id in train_loader:
-            img_set = Variable(img.to(device))
-            id_set = Variable(dog_id.to(device))
-
-            output = model(img_set)
-
-            loss = 0
-            if 'a' in args.loss:
-                logits = arcface_loss(output, id_set)
-                loss_a = ce_loss(logits, id_set)
-                loss += loss_a
-            if 's' in args.loss:
-                logits = soft_triple_loss(output)
-                loss_s = soft_triple_loss.loss(logits, id_set)
-                loss += loss_s
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            training_loss += loss.item()
-
-            preds = torch.argmax(logits, dim=1).to(torch.device("cpu"))
-            correct += (preds == dog_id).sum().item()
-            total += dog_id.size(0)
-
-        train_acc = correct / total
-        print(f"Epoch [{epoch+1}/{num_epochs}] Train Loss: {training_loss/len(train_loader):.4f}, Train Acc: {train_acc * 100:.4f}")
-        val_loss, val_acc = evaluate(model, val_loader, arcface_loss, soft_triple_loss, ce_loss, device)
-        print(f"Epoch [{epoch+1}/{num_epochs}] Val Loss: {val_loss:.4f}, Val Acc: {val_acc * 100:.4f}")
-
-        scheduler.step()
-
-    torch.save(model.state_dict(), f"{args.output}.pt")
-    if arcface_loss is not None:
-        torch.save(arcface_loss.state_dict(), f"{args.output}_arcface.pt")
-    if soft_triple_loss is not None:
-        torch.save(soft_triple_loss.state_dict(), f"{args.output}_soft.pt")
-
-train()
+pred_df.to_csv(f"{args.output}.csv")
