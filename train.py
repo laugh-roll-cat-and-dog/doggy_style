@@ -68,8 +68,7 @@ train_transforms_2 = transforms.Compose([
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 val_transforms = transforms.Compose([
@@ -78,9 +77,9 @@ val_transforms = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-train_dataset = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms_2)
-# train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
-# train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
+train_dataset_1 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms_2)
+train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
+train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
 
 val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
@@ -437,7 +436,7 @@ class Network(nn.Module):
 
 ## Loss
 class ArcFace(nn.Module):
-    def __init__(self, embed_size, num_classes, scale=30, margin=0.5, easy_margin=False, **kwargs):
+    def __init__(self, embed_size, num_classes, scale=30, margin=0.35, easy_margin=False, **kwargs):
         """
         The input of this Module should be a Tensor which size is (N, embed_size), and the size of output Tensor is (N, num_classes).
         
@@ -473,7 +472,9 @@ class ArcFace(nn.Module):
         else:
             phi = torch.where(pos > self.th, phi, pos - self.mm)
         # one_hot = torch.zeros(cos_theta.size(), device='cuda')
-        output = torch.scatter(cos_theta, 1, ground_truth.view(-1, 1).long(), phi)
+        one_hot = torch.zeros_like(cos_theta)
+        one_hot.scatter_(1, ground_truth.view(-1, 1).long(), 1)
+        output = cos_theta * (1 - one_hot) + phi * one_hot
         # output = cos_theta + one_hot
         output *= self.scale
         return output
@@ -617,21 +618,28 @@ def train():
             output = model(img_set)
 
             loss = 0
+            combined_logits = 0.0
             if 'a' in args.loss:
-                logits = arcface_loss(output, id_set)
-                loss_a = ce_loss(logits, id_set)
+                logits_a = arcface_loss(output, id_set)
+                #print(logits_a)
+                loss_a = ce_loss(logits_a, id_set)
                 loss += loss_a
+                combined_logits += torch.softmax(logits_a, dim=1)
             if 's' in args.loss:
-                logits = soft_triple_loss(output)
-                loss_s = soft_triple_loss.loss(logits, id_set)
+                logits_s = soft_triple_loss(output)
+                loss_s = soft_triple_loss.loss(logits_s, id_set)
                 loss += loss_s
-            
+                combined_logits += torch.softmax(logits_s, dim=1)
+            if arcface_loss is not None and soft_triple_loss is not None:
+                combined_logits /= 2.0
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             training_loss += loss.item()
 
-            preds = torch.argmax(logits, dim=1).to(torch.device("cpu"))
+            preds = torch.argmax(combined_logits, dim=1).to(torch.device("cpu"))
+            # print(preds[:10], id_set[:10])
             correct += (preds == dog_id).sum().item()
             total += dog_id.size(0)
 
