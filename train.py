@@ -53,12 +53,23 @@ class DogDataset(Dataset):
         
         return image, label
 
-train_transforms = transforms.Compose([
+train_transforms_1 = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_2 = transforms.Compose([
+    transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(degrees=10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225])
 ])
 
 val_transforms = transforms.Compose([
@@ -67,9 +78,9 @@ val_transforms = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-train_dataset_1 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms)
-train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
-train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
+train_dataset = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms_2)
+# train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
+# train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
 
 val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
@@ -575,7 +586,7 @@ def train():
     if 'a' in args.loss:
         arcface_loss = ArcFace(1024, int(args.c)).to(device)
     if 's' in args.loss:
-        soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 4).to(device)
+        soft_triple_loss = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 3).to(device)
 
     ce_loss = nn.CrossEntropyLoss()
 
