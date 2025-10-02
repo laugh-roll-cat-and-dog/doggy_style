@@ -11,6 +11,7 @@ from torch.nn import init
 import math
 import numpy as np
 import argparse
+from sklearn.metrics import accuracy_score
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str, metavar="attention",
@@ -53,7 +54,7 @@ class DogDataset(Dataset):
 
 val_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.transformsoTensor(),
+    transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
@@ -505,7 +506,6 @@ def loopcheck(test_embeddings, gallery_embeddings):
                 for gallery_emb in gallery_emb_list:
                     sim = F.cosine_similarity(test_emb.unsqueeze(0), gallery_emb.unsqueeze(0)).item()
                     sims.append(sim)
-                    print(f"Comparing Test {test_label}[{idx}] with Gallery {gallery_label}: Similarity = {sim:.4f}")
 
                 avg_sim = sum(sims) / len(sims) if sims else 0
                 sims_dict[gallery_label] = avg_sim  # เก็บค่าเฉลี่ย similarity
@@ -524,19 +524,19 @@ def loopcheck(test_embeddings, gallery_embeddings):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = Network()
-model.load_state_dict(torch.load(args.model), map_location=device)
+model = Network().to(device)
+model.load_state_dict(torch.load(args.model, map_location=device))
 model.eval()
 
 arcface, softtriple = None, None
 if 'a' in args.loss:
-    arcface = ArcFace(1024, int(args.c))
-    arcface.load_state_dict(torch.load(args.arcface), map_location=device)
+    arcface = ArcFace(1024, int(args.c)).to(device)
+    arcface.load_state_dict(torch.load(args.arcface, map_location=device))
     arcface.eval()
 
 if 's' in args.loss:
-    softtriple = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 10)
-    softtriple.load_state_dict(torch.load(args.softtriple), map_location=device)
+    softtriple = SoftTriple(20, 0.1, 0.2, 0.01, 1024, int(args.c), 3).to(device)
+    softtriple.load_state_dict(torch.load(args.softtriple, map_location=device))
     softtriple.eval()
 
 result = []
@@ -547,7 +547,7 @@ with torch.no_grad():
 
     for i, (image, label) in enumerate(gallery_loader):
         img_set1 = image.to(device)
-        output = model(img_set1).detach().cpu()  # detach and move to CPU
+        output = model(img_set1)
 
         for idx, item in enumerate(label):
             lbl = item.item()
@@ -571,6 +571,7 @@ with torch.no_grad():
             else:
                 test_embeddings[lbl2].append(emb2)
 
+        combined_logits = 0.0
         if arcface is not None:
             logits_a = arcface(emb, dog_id)
             combined_logits += torch.softmax(logits_a, dim=1)
@@ -586,28 +587,34 @@ with torch.no_grad():
         top5_prob, top5_idx = torch.topk(pred_prob, k=5, dim=1)
 
         for i in range(len(img)):
-            result.append((
+            result.append([
                 dog_id[i].item(),
                 top5_idx[i][0].item(),
                 top5_idx[i][1].item(),
                 top5_idx[i][2].item(),
                 top5_idx[i][3].item(),
                 top5_idx[i][4].item()
-            ))
+            ])
     checking_results = loopcheck(test_embeddings, gallery_embeddings)
     acc_count = 0
     for i, res in enumerate(checking_results):
         if res['test_label'] == res['ans']:
             acc_count += 1
-        
-        print(res['ans'], res['test_label'], result['dog_id'][i])
+        result[i].append(res['ans'])
     accuracy = (acc_count / (len(checking_results)-3)*100) if checking_results else 0
     print(f"Identification Accuracy: {accuracy:.2f}%")
 
-
-
 pred_df = pd.DataFrame(result, columns=[
-    'dog_id', 'top1', 'top2', 'top3', 'top4', 'top5'
+    'dog_id', 'top1', 'top2', 'top3', 'top4', 'top5', 'emb'
 ])
 
 pred_df.to_csv(f"{args.output}.csv")
+
+y_true = pred_df["dog_id"].values
+y_pred_top1 = pred_df["top1"].values
+y_pred_emb = pred_df["emb"].values
+
+acc_top1 = accuracy_score(y_true, y_pred_top1)
+acc_emb = accuracy_score(y_true, y_pred_emb)
+print("Classifier head Accuracy:", acc_top1 * 100)
+print("embedding Accuracy:", acc_emb * 100)

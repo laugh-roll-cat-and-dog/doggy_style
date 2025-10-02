@@ -4,5 +4,5 @@ python3 evaluate.py -a d \
         -ah 1.a.arcface.pt \
         -sh - \
         -c 118 \
-        -o 1.a
+        -o 1.a \
         -l a
