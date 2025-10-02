@@ -600,9 +600,10 @@ with torch.no_grad():
     for i, res in enumerate(checking_results):
         if res['test_label'] == res['ans']:
             acc_count += 1
+        # print(f"label_1: {res['test_label']}, label_2: {result[i][0]}")
         result[i].append(res['ans'])
-    accuracy = (acc_count / (len(checking_results)-3)*100) if checking_results else 0
-    print(f"Identification Accuracy: {accuracy:.2f}%")
+    # accuracy = (acc_count / (len(checking_results))*100) if checking_results else 0
+    # print(f"Identification Accuracy: {accuracy:.2f}%")
 
 pred_df = pd.DataFrame(result, columns=[
     'dog_id', 'top1', 'top2', 'top3', 'top4', 'top5', 'emb'

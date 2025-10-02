@@ -384,7 +384,7 @@ class Network(nn.Module):
         if args.pretrained == 'coco':
             resnet.load_state_dict((torch.load("byol_coco.pt", map_location=torch.device('cuda'))))
         elif args.pretrained == 'stand':
-            resnet.load_state_dict((torch.load("byol_stand.pt", map_location=torch.device('cuda'))))
+            resnet.load_state_dict((torch.load("byol_stan.pt", map_location=torch.device('cuda'))))
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
         self.extra_layers = nn.Sequential(
