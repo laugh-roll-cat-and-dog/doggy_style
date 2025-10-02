@@ -17,8 +17,6 @@ parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb']
                     help='attention module')
 parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
                     help='concat backbone feature maps to last feature maps')
-parser.add_argument('-e', '--epoch', type=int, metavar="epoch",
-                    help='number of epoch')
 parser.add_argument('-c', type=int, metavar="class",
                     help='number of class')
 parser.add_argument('-m', '--model', type=str, metavar="model",
@@ -61,6 +59,9 @@ val_transforms = transforms.Compose([
 
 val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+
+gallery_dataset = DogDataset(csv_file='train_split_sampled.csv', transform=val_transforms)
+gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
 ## NN
 #---DAM---
@@ -410,7 +411,7 @@ class Network(nn.Module):
 
 ## Loss
 class ArcFace(nn.Module):
-    def __init__(self, embed_size, num_classes, scale=30, margin=0.5, easy_margin=False, **kwargs):
+    def __init__(self, embed_size, num_classes, scale=16, margin=0.1, easy_margin=False, **kwargs):
         """
         The input of this Module should be a Tensor which size is (N, embed_size), and the size of output Tensor is (N, num_classes).
         
@@ -472,10 +473,54 @@ class SoftTriple(nn.Module):
         centers = F.normalize(self.fc, p=2, dim=0)
         simInd = input.matmul(centers)
         simStruc = simInd.reshape(-1, self.cN, self.K)
-        prob = F.softmax(simStruc*self.gamma, dim=2)
-        simClass = torch.sum(prob*simStruc, dim=2)
+        prob = F.softmax(simStruc * self.gamma, dim=2)
+        simClass = torch.sum(prob * simStruc, dim=2)
 
-        return simClass 
+        return self.la * simClass
+
+    def loss(self, logits, target):
+        marginM = torch.zeros_like(logits).to(logits.device)
+        marginM[torch.arange(0, marginM.shape[0]), target] = self.margin
+
+        lossClassify = F.cross_entropy(self.la*((logits/self.la)-marginM), target)
+
+        if self.tau > 0 and self.K > 1:
+            centers = F.normalize(self.fc, p=2, dim=0)
+            simCenter = centers.t().matmul(centers)
+            reg = torch.sum(torch.sqrt(2.0+1e-5-2.*simCenter[self.weight]))/(self.cN*self.K*(self.K-1.))
+            return lossClassify+self.tau*reg
+        else:
+            return lossClassify
+
+def loopcheck(test_embeddings, gallery_embeddings):
+    results = []  # จะเก็บเป็น list ของ dictionary
+
+    for test_label, test_emb_list in test_embeddings.items():
+        for idx, test_emb in enumerate(test_emb_list):  # วนทุก test embedding ทีละตัว
+            row_result = {"test_label": test_label, "test_index": idx}
+            
+            sims_dict = {}
+            for gallery_label, gallery_emb_list in gallery_embeddings.items():
+                sims = []
+                for gallery_emb in gallery_emb_list:
+                    sim = F.cosine_similarity(test_emb.unsqueeze(0), gallery_emb.unsqueeze(0)).item()
+                    sims.append(sim)
+                    print(f"Comparing Test {test_label}[{idx}] with Gallery {gallery_label}: Similarity = {sim:.4f}")
+
+                avg_sim = sum(sims) / len(sims) if sims else 0
+                sims_dict[gallery_label] = avg_sim  # เก็บค่าเฉลี่ย similarity
+
+            # เพิ่มค่าเฉลี่ยเข้า row_result
+            row_result.update(sims_dict)
+
+            # หา gallery label ที่มีค่าเฉลี่ยสูงสุด
+            if sims_dict:
+                row_result['ans'] = max(sims_dict, key=sims_dict.get)
+            else:
+                row_result['ans'] = None
+
+            results.append(row_result)
+    return results
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -497,9 +542,34 @@ if 's' in args.loss:
 result = []
 
 with torch.no_grad():
+    #gallery
+    gallery_embeddings = {}
+
+    for i, (image, label) in enumerate(gallery_loader):
+        img_set1 = image.to(device)
+        output = model(img_set1).detach().cpu()  # detach and move to CPU
+
+        for idx, item in enumerate(label):
+            lbl = item.item()
+            emb = output[idx]
+            if lbl not in gallery_embeddings:
+                gallery_embeddings[lbl] = [emb]
+            else:
+                gallery_embeddings[lbl].append(emb)
+
+    test_embeddings = {}
+
     for (img, dog_id) in val_loader:
         img, dog_id = img.to(device), dog_id.to(device)
         emb = model(img)
+
+        for idx2, item2 in enumerate(dog_id):
+            lbl2 = item2.item()
+            emb2 = emb[idx2]
+            if lbl2 not in test_embeddings:
+                test_embeddings[lbl2] = [emb2]
+            else:
+                test_embeddings[lbl2].append(emb2)
 
         if arcface is not None:
             logits_a = arcface(emb, dog_id)
@@ -524,6 +594,17 @@ with torch.no_grad():
                 top5_idx[i][3].item(),
                 top5_idx[i][4].item()
             ))
+    checking_results = loopcheck(test_embeddings, gallery_embeddings)
+    acc_count = 0
+    for i, res in enumerate(checking_results):
+        if res['test_label'] == res['ans']:
+            acc_count += 1
+        
+        print(res['ans'], res['test_label'], result['dog_id'][i])
+    accuracy = (acc_count / (len(checking_results)-3)*100) if checking_results else 0
+    print(f"Identification Accuracy: {accuracy:.2f}%")
+
+
 
 pred_df = pd.DataFrame(result, columns=[
     'dog_id', 'top1', 'top2', 'top3', 'top4', 'top5'
