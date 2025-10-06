@@ -412,7 +412,7 @@ class Network(nn.Module):
 
 ## Loss
 class ArcFace(nn.Module):
-    def __init__(self, embed_size, num_classes, scale=16, margin=0.1, easy_margin=False, **kwargs):
+    def __init__(self, embed_size, num_classes, scale=16, margin=0.02, easy_margin=False, **kwargs):
         """
         The input of this Module should be a Tensor which size is (N, embed_size), and the size of output Tensor is (N, num_classes).
         
