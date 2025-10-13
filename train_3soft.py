@@ -686,8 +686,8 @@ def train():
                 # loss = awl(loss_s_1, loss_s_2, loss_s_3)
                 logits_s = logits_s_1 + logits_s_2 + logits_s_3
                 combined_logits += torch.softmax(logits_s, dim=1)
-            # if arcface_loss is not None and soft_triple_loss_1 is not None:
-            #     combined_logits /= 2.0
+            if arcface_loss is not None and soft_triple_loss_1 is not None:
+                loss /= 2.0
 
             optimizer.zero_grad()
             loss.backward()
