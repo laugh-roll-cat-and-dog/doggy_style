@@ -111,10 +111,10 @@ else:
             
             return image, torch.tensor(label, dtype=torch.long)
         
-    train_dataset_1 = DogDataset(csv_file='classify_rebuild.csv', root_dir=os.path.join('pet_biometric_challenge_2022', 'train', 'images'), transform=train_transforms_2)
-    train_dataset_2 = DogDataset(csv_file='classify_rebuild.csv', root_dir=os.path.join('pet_biometric_challenge_2022', 'train', 'images'), transform=val_transforms)
+    train_dataset_1 = DogDataset(csv_file='dogNose_train.csv', transform=train_transforms_2)
+    train_dataset_2 = DogDataset(csv_file='dogNose_train.csv', transform=val_transforms)
     train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
-    val_dataset = DogDataset(csv_file='classify_validation_dataset.csv', root_dir=os.path.join('pet_biometric_challenge_2022', 'train', 'images'), transform=val_transforms)
+    val_dataset = DogDataset(csv_file='dogNose_test.csv', transform=val_transforms)
 
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
