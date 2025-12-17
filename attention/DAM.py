@@ -80,5 +80,5 @@ class DualAttentionModule(nn.Module):
         pam_out = self.pam(x)  
         cam_out = self.cam(x)  
 
-        out = torch.cat([cam_out, pam_out, x], dim=1)
+        out = torch.cat([cam_out, pam_out], dim=1)
         return out

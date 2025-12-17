@@ -5,18 +5,12 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import torchvision.transforms as transforms
 import torch
 import torch.nn as nn
-import torchvision.models as models
-from transformers import AutoImageProcessor, ConvNextV2ForImageClassification
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.autograd import Variable
 import argparse
 from sklearn.metrics import accuracy_score
 
-from attention.BAM import BAM
-from attention.DAM import ChannelAttentionModule, PositionAttentionModule, DualAttentionModule
-from attention.SAM import Self_Attention
-from attention.SEblock import FeatureFusionModule
+from network.network import Network
 
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
@@ -36,7 +30,7 @@ parser.add_argument('-c', type=int, metavar="class",
                     help='number of class')
 parser.add_argument('-l', '--loss', choices=['a', 's', 'as', 'n'], type=str, metavar="loss",
                     help='loss function')
-parser.add_argument('-d', '--dataset', choices=['face', 'nose'], type=str, metavar="dataset",
+parser.add_argument('-d', '--dataset', choices=['face', 'nose', 'nose_old'], type=str, metavar="dataset",
                     help='what dataset to use')
 args = parser.parse_args()
 
@@ -59,6 +53,44 @@ train_transforms_2 = transforms.Compose([
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
     transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_3 = transforms.Compose([
+    transforms.RandomRotation(degrees=15),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomAffine(
+        degrees=0,
+        translate=(0.1, 0.1),
+        scale=(0.9, 1.1)
+    ),
+    transforms.RandomResizedCrop(
+        size=(224, 224),
+        scale=(0.9, 1.0),
+        ratio=(0.95, 1.05)
+    ),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_4 = transforms.Compose([
+    transforms.ColorJitter(
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.2,
+        hue=0.05
+    ),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_5 = transforms.Compose([
+    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0)),
+    transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: x + 0.05 * torch.randn_like(x)),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
@@ -92,7 +124,7 @@ if args.dataset == 'face':
     train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
     val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
 
-else:
+elif args.dataset == 'nose':
     class DogDataset(Dataset):
         def __init__(self, csv_file, root_dir="", transform=None):
             self.df = pd.read_csv(csv_file)
@@ -124,86 +156,35 @@ else:
     train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
     val_dataset = DogDataset(csv_file='dogNose_test.csv', transform=val_transforms)
 
+else:
+    class DogDataset(Dataset):
+        def __init__(self,csv_file, transform=None):
+            self.df = pd.read_csv(csv_file)
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.df)
+        
+        def __getitem__(self, index):
+            img_path = self.df.loc[index,'filename']
+            img_path = os.path.join("dog_nose_2022", img_path)
+            label = self.df.loc[index,'new_dog_id']
+            image = Image.open(img_path).convert('RGB')
+
+            if self.transform:
+                image = self.transform(image)
+            
+            return image, label
+    train_dataset_1 = DogDataset(csv_file='training.csv', transform=train_transforms_3)
+    train_dataset_2 = DogDataset(csv_file='training.csv', transform=train_transforms_4)
+    train_dataset_3 = DogDataset(csv_file='training.csv', transform=train_transforms_5)
+    train_dataset_4 = DogDataset(csv_file='training.csv', transform=val_transforms)
+    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2, train_dataset_3, train_dataset_4])
+    val_dataset = DogDataset(csv_file='validation.csv', transform=val_transforms)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=6)
 
-## NN
-class Network(nn.Module):
-    def __init__(self, embedding_dim=1024):
-        super().__init__()
-        model_name = "facebook/convnextv2-tiny-1k-224"
-        base_model = ConvNextV2ForImageClassification.from_pretrained(model_name)
-
-        self.backbone = base_model.convnextv2
-        num_features = base_model.classifier.in_features
-        for name, param in self.backbone.named_parameters():
-            if 'stages.3' in name or 'layernorm' in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-
-        self.cam = ChannelAttentionModule()
-        self.pam = PositionAttentionModule(num_features)
-        self.dam = DualAttentionModule(in_channels=num_features)
-        self.sam = Self_Attention(num_features)
-        self.bam = BAM(num_features)
-        
-        in_chan = 0
-        if args.attention == 'sb':
-            in_chan = num_features * 2
-        elif args.attention == 'dsb':
-            in_chan = num_features * 3
-        else:
-            in_chan = num_features
-
-        if args.bf == 't':
-            in_chan += num_features
-
-        self.orchestra = FeatureFusionModule(
-            in_chan=in_chan,
-            out_chan=3 * num_features,
-            attention=args.attention,
-            bf=args.bf
-        )
-
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(3 * num_features, embedding_dim, bias=False)
-        self.ln = nn.LayerNorm(embedding_dim)
-
-    def extract_backbone(self, x):
-        out = self.backbone(x)
-        features = out.last_hidden_state
-        return features
-
-    def embed(self, x):
-        feat = self.extract_backbone(x)
-
-        if args.attention == 'd':
-            fused = self.dam(feat)
-        if args.attention == 'sb':
-            att1 = self.sam(feat)
-            att2 = self.bam(feat)
-            fused = self.orchestra(att1, att2, feat)
-        elif args.attention == 'dsb':
-            att1 = self.dam(feat)
-            att2 = self.sam(feat)
-            att3 = self.bam(feat)
-            fused = self.orchestra(att1, att2, att3, feat)
-        else:
-            fused = feat
-
-        fused = self.gap(fused)
-        fused = fused.view(fused.size(0), -1)
-
-        x = self.fc(fused)
-        x = self.ln(x)
-        x = F.normalize(x, p=2, dim=1)
-        return x
-
-    def forward(self, img):
-        return self.embed(img)
 
 ## Scheduler
 def lr_lambda(epoch):
@@ -270,7 +251,7 @@ def evaluate(model, val_loader, arcface_loss, soft_triple_loss_1, soft_triple_lo
 
 ## Train
 def train():
-    model = Network().to(device)
+    model = Network(args.attention, args.bf).to(device)
 
     arcface_loss, soft_triple_loss_1, soft_triple_loss_2, soft_triple_loss_3 = None, None, None, None
     if 'a' in args.loss:

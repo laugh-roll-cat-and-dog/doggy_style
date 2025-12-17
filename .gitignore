@@ -1,0 +1,5 @@
+*.jpg
+*.pt
+train_linear.py
+__pycache__
+*/__pycache__

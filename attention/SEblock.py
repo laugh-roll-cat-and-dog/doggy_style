@@ -38,11 +38,13 @@ class FeatureFusionModule(nn.Module):
         self.attention = attention
         self.bf = bf
 
-    def forward(self, fsp, fcp, cam, pam, x):
+    def forward(self, fsp=None, fcp=None, cam=None, pam=None, x=None):
         if self.attention == 'dsb':
             fcat = torch.cat([fsp, fcp, cam, pam], dim=1)
-        else:
+        elif self.attention == 'sb':
             fcat = torch.cat([fsp, fcp], dim=1)
+        else:
+            fcat = torch.cat([cam, pam], dim=1)
         if self.bf == 't':
             fcat = torch.cat([fcat, x], dim=1)
         feat = self.convblk(fcat)
