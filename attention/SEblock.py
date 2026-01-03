@@ -16,7 +16,7 @@ class ConvBNReLU(nn.Module):
         return self.conv_bn_relu(x)
 
 class FeatureFusionModule(nn.Module):
-    def __init__(self, in_chan, out_chan, attention, bf):
+    def __init__(self, in_chan, out_chan, attention):
         super(FeatureFusionModule, self).__init__()
         self.convblk = ConvBNReLU(in_chan, out_chan, kernel_size=1, stride=1, padding=0)
         self.conv1 = nn.Conv2d(out_chan,
@@ -36,7 +36,6 @@ class FeatureFusionModule(nn.Module):
         #self.softmax = nn.Softmax()
         self.init_weight()
         self.attention = attention
-        self.bf = bf
 
     def forward(self, fsp=None, fcp=None, cam=None, pam=None, x=None):
         if self.attention == 'dsb':
@@ -45,8 +44,6 @@ class FeatureFusionModule(nn.Module):
             fcat = torch.cat([fsp, fcp], dim=1)
         else:
             fcat = torch.cat([cam, pam], dim=1)
-        if self.bf == 't':
-            fcat = torch.cat([fcat, x], dim=1)
         feat = self.convblk(fcat)
         atten = F.avg_pool2d(feat, feat.size()[2:])
         atten = self.conv1(atten)
