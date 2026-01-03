@@ -6,3 +6,4 @@ scikit-learn
 matplotlib
 grad-cam
 hf_xet
+accelerate
