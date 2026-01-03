@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import  ConvNextV2ForImageClassification
+from transformers import  ConvNextV2ForImageClassification, AutoModel
 
 from attention.BAM import BAM
 from attention.DAM import ChannelAttentionModule, PositionAttentionModule, DualAttentionModule
@@ -8,20 +8,22 @@ from attention.SAM import Self_Attention
 from attention.SEblock import FeatureFusionModule
 
 class Network(nn.Module):
-    def __init__(self, attention, bf, embedding_dim=1024):
+    def __init__(self, backbone, attention, embedding_dim=1024):
         super().__init__()
         self.attention = attention
-        self.bf = bf
-        model_name = "facebook/convnextv2-tiny-1k-224"
-        base_model = ConvNextV2ForImageClassification.from_pretrained(model_name)
-
-        self.backbone = base_model.convnextv2
-        num_features = base_model.classifier.in_features
-        for name, param in self.backbone.named_parameters():
-            if 'stages.3' in name or 'convnextv2.layernorm' in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        if backbone == 'dino':
+            model_name = "facebook/dinov3-convnext-tiny-pretrain-lvd1689m"
+            model = AutoModel.from_pretrained(
+                model_name, 
+                device_map="cuda", 
+            )
+            self.backbone = nn.Sequential(*list(model.children())[:-1])
+            num_features = model.layer_norm.normalized_shape[0]
+        elif backbone == 'v2':
+            model_name = "facebook/convnextv2-tiny-1k-224"
+            base_model = ConvNextV2ForImageClassification.from_pretrained(model_name)
+            self.backbone = base_model.convnextv2
+            num_features = base_model.classifier.in_features
 
         self.cam = ChannelAttentionModule()
         self.pam = PositionAttentionModule(num_features)
@@ -37,24 +39,23 @@ class Network(nn.Module):
         else:
             in_chan = num_features
 
-        if bf == 't':
-            in_chan += num_features
 
         self.orchestra = FeatureFusionModule(
             in_chan=in_chan,
-            out_chan=2 * num_features,
+            out_chan=3 * num_features,
             attention=attention,
-            bf=bf
         )
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(2 * num_features, embedding_dim, bias=False)
+        self.fc = nn.Linear(num_features, embedding_dim, bias=False)
+        self.fc_att = nn.Linear(3 * num_features, embedding_dim, bias=False)
         self.ln = nn.LayerNorm(embedding_dim)
 
     def extract_backbone(self, x):
         out = self.backbone(x)
-        features = out.last_hidden_state
-        return features
+        if hasattr(out, 'last_hidden_state'):
+            return out.last_hidden_state
+        return out
 
     def embed(self, x):
         feat = self.extract_backbone(x)
@@ -62,24 +63,27 @@ class Network(nn.Module):
         if self.attention == 'd':
             att1 = self.cam(feat)
             att2 = self.pam(feat)
-            fused = self.orchestra(cam=att1, pam=att2, x=feat)
+            fused = self.orchestra(cam=att1, pam=att2)
         elif self.attention == 'sb':
             att1 = self.sam(feat)
             att2 = self.bam(feat)
-            fused = self.orchestra(fsp=att1, fcp=att2, x=feat)
+            fused = self.orchestra(fsp=att1, fcp=att2)
         elif self.attention == 'dsb':
             att1 = self.cam(feat)
             att2 = self.pam(feat)
             att3 = self.sam(feat)
             att4 = self.bam(feat)
-            fused = self.orchestra(cam=att1, pam=att2, fsp=att3, fcp=att4, x=feat)
+            fused = self.orchestra(cam=att1, pam=att2, fsp=att3, fcp=att4)
         else:
             fused = feat
 
         fused = self.gap(fused)
         fused = fused.view(fused.size(0), -1)
 
-        x = self.fc(fused)
+        if self.attention == 'n':
+            x = self.fc(fused)
+        else:
+            x = self.fc_att(fused)
         x = self.ln(x)
         x = F.normalize(x, p=2, dim=1)
         return x

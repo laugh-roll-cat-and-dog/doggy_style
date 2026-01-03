@@ -37,7 +37,7 @@ class FeatureFusionModule(nn.Module):
         self.init_weight()
         self.attention = attention
 
-    def forward(self, fsp=None, fcp=None, cam=None, pam=None, x=None):
+    def forward(self, fsp=None, fcp=None, cam=None, pam=None):
         if self.attention == 'dsb':
             fcat = torch.cat([fsp, fcp, cam, pam], dim=1)
         elif self.attention == 'sb':
