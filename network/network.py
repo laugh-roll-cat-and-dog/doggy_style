@@ -1,5 +1,7 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
 from transformers import  ConvNextV2ForImageClassification, AutoModel
 
 from attention.BAM import BAM
@@ -7,7 +9,7 @@ from attention.DAM import ChannelAttentionModule, PositionAttentionModule, DualA
 from attention.SAM import Self_Attention
 from attention.SEblock import FeatureFusionModule
 
-class Network(nn.Module):
+class Network_ConvNext(nn.Module):
     def __init__(self, backbone, attention, embedding_dim=1024):
         super().__init__()
         self.attention = attention
@@ -38,7 +40,6 @@ class Network(nn.Module):
             in_chan = num_features * 4
         else:
             in_chan = num_features
-
 
         self.orchestra = FeatureFusionModule(
             in_chan=in_chan,
@@ -90,3 +91,58 @@ class Network(nn.Module):
 
     def forward(self, img):
         return self.embed(img)
+
+class Network_Resnet(nn.Module):
+    def __init__(self, attention, embedding_dim=1024):
+        super().__init__()
+        self.attention = attention
+        resnet = models.resnet50()
+        resnet.load_state_dict((torch.load("byol_stan.pt", map_location="cuda")))
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
+
+        self.extra_layers = nn.Sequential(
+            nn.Conv2d(2048, 1024, kernel_size=3, stride=1, padding=1), 
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        self.cam = ChannelAttentionModule()
+        self.pam = PositionAttentionModule(512)
+        self.dam = DualAttentionModule(in_channels=512)  
+        self.gap = nn.AdaptiveAvgPool2d((1,1))
+
+        self.sam = Self_Attention(512)
+        self.bam = BAM(512)
+        in_chan = 0
+        if self.attention == 'sb':
+            in_chan = 1024
+        elif self.attention == 'dsb':
+            in_chan = 2048
+        if self.bf == 't':
+            in_chan += 512
+        self.orchesta = FeatureFusionModule(in_chan, 3*512, self.attention)
+
+        self.fc = nn.Linear(3*512, embedding_dim, bias=False)  
+        self.bn = nn.BatchNorm1d(embedding_dim)
+
+    def embed(self, x):
+        x = self.backbone(x)
+        x = self.extra_layers(x)   
+        if self.attention == 'd':
+            x = self.dam(x)                 
+        else:
+            x = self.orchesta(self.sam(x), self.bam(x), self.cam(x), self.pam(x))
+        x = self.gap(x)
+        x = x.view(x.size(0), -1)      
+        x = self.fc(x)             
+        x = self.bn(x)
+
+        x = F.normalize(x, p=2, dim=1)
+        return x
+
+    def forward(self, img):
+        emb = self.embed(img)
+        return emb
