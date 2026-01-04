@@ -1,8 +1,7 @@
-python3 train_3soft.py -p n \
-        -a d \
-        -bf t \
-        -e 200 \
+uv run train_convnext.py -a sb \
+        -b dino \
+        -e 32 \
         -o 1.a \
-        -c 118 \
+        -c 46 \
         -l a \
-        -d face
+        -d nose

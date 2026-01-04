@@ -10,7 +10,7 @@ from torch.autograd import Variable
 import argparse
 from sklearn.metrics import accuracy_score
 
-from network.network import Network
+from network.network import Network_ConvNext, Network_Resnet
 
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
@@ -18,12 +18,10 @@ from loss.softTriple import SoftTriple
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb', 'n'], type=str, metavar="attention",
                     help='attention module')
-parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
-                    help='concat backbone feature maps to last feature maps')
+parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
+                    help='backbone')
 parser.add_argument('-o', '--output', type=str, metavar="output",
                     help='output model filename')
-parser.add_argument('-p', '--pretrained', choices=['n', 'coco', 'stand'], type=str, metavar="pretrained",
-                    help='pre-trained model')
 parser.add_argument('-e', '--epoch', type=int, metavar="epoch",
                     help='number of epoch')
 parser.add_argument('-c', type=int, metavar="class",
@@ -35,7 +33,7 @@ parser.add_argument('-d', '--dataset', choices=['face', 'nose', 'nose_old'], typ
 args = parser.parse_args()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
+# print(device)
 
 ## Data
 train_transforms_1 = transforms.Compose([
@@ -136,8 +134,8 @@ elif args.dataset == 'nose':
         
         def __getitem__(self, index):
             # Read row
-            img_name = self.df.loc[index, 'image']
-            label = self.df.loc[index, 'dog_id']
+            img_name = self.df.loc[index, 'filepath']
+            label = self.df.loc[index, 'label']
             img_name = img_name.replace('\\', '/')
             img_path = os.path.join(self.root_dir, img_name) if self.root_dir else img_name
 
@@ -158,32 +156,45 @@ elif args.dataset == 'nose':
 
 else:
     class DogDataset(Dataset):
-        def __init__(self,csv_file, transform=None):
-            self.df = pd.read_csv(csv_file)
+        def __init__(self, root_dir, transform=None):
+            self.root_dir = root_dir
             self.transform = transform
+            self.samples = []
+
+            for class_name in sorted(os.listdir(root_dir)):
+                class_path = os.path.join(root_dir, class_name)
+
+                if not os.path.isdir(class_path):
+                    continue
+
+                label = int(class_name)
+
+                for fname in os.listdir(class_path):
+                    fpath = os.path.join(class_path, fname)
+
+                    if os.path.isfile(fpath):
+                        self.samples.append((fpath, label))
 
         def __len__(self):
-            return len(self.df)
-        
+            return len(self.samples)
+
         def __getitem__(self, index):
-            img_path = self.df.loc[index,'filename']
-            img_path = os.path.join("dog_nose_2022", img_path)
-            label = self.df.loc[index,'new_dog_id']
-            image = Image.open(img_path).convert('RGB')
+            img_path, label = self.samples[index]
+            image = Image.open(img_path).convert("RGB")
 
             if self.transform:
                 image = self.transform(image)
-            
-            return image, label
-    train_dataset_1 = DogDataset(csv_file='training.csv', transform=train_transforms_3)
-    train_dataset_2 = DogDataset(csv_file='training.csv', transform=train_transforms_4)
-    train_dataset_3 = DogDataset(csv_file='training.csv', transform=train_transforms_5)
-    train_dataset_4 = DogDataset(csv_file='training.csv', transform=val_transforms)
-    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2, train_dataset_3, train_dataset_4])
-    val_dataset = DogDataset(csv_file='validation.csv', transform=val_transforms)
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=6)
+            return image, label
+    train_dataset_1 = DogDataset('dataset/train', transform=train_transforms_3)
+    train_dataset_2 = DogDataset('dataset/train', transform=train_transforms_4)
+    train_dataset_3 = DogDataset('dataset/train', transform=train_transforms_5)
+    train_dataset_4 = DogDataset('dataset/train', transform=val_transforms)
+    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2, train_dataset_3, train_dataset_4])
+    val_dataset = DogDataset('dataset/validate', transform=val_transforms)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
 
 ## Scheduler
@@ -251,7 +262,10 @@ def evaluate(model, val_loader, arcface_loss, soft_triple_loss_1, soft_triple_lo
 
 ## Train
 def train():
-    model = Network(args.attention, args.bf).to(device)
+    if args.backbone == 'resnet':
+        model = Network_Resnet(args.attention).to(device)
+    else:
+        model = Network_ConvNext(args.backbone, args.attention).to(device)
 
     arcface_loss, soft_triple_loss_1, soft_triple_loss_2, soft_triple_loss_3 = None, None, None, None
     if 'a' in args.loss:

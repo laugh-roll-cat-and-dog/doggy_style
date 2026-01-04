@@ -13,13 +13,14 @@ class Network_ConvNext(nn.Module):
     def __init__(self, backbone, attention, embedding_dim=1024):
         super().__init__()
         self.attention = attention
+        self.bb = backbone
         if backbone == 'dino':
             model_name = "facebook/dinov3-convnext-tiny-pretrain-lvd1689m"
             model = AutoModel.from_pretrained(
                 model_name, 
                 device_map="cuda", 
             )
-            self.backbone = nn.Sequential(*list(model.children())[:-1])
+            self.backbone = model
             num_features = model.layer_norm.normalized_shape[0]
         elif backbone == 'v2':
             model_name = "facebook/convnextv2-tiny-1k-224"
@@ -54,12 +55,20 @@ class Network_ConvNext(nn.Module):
 
     def extract_backbone(self, x):
         out = self.backbone(x)
-        if hasattr(out, 'last_hidden_state'):
-            return out.last_hidden_state
-        return out
+        if self.bb == 'dino':
+            feat = out.last_hidden_state
+            feat = feat[:, 1:, :]
+            B, N, C = feat.shape
+            
+            H = W = int(N ** 0.5)
+
+            feat = feat.transpose(1, 2).reshape(B, C, H, W)
+            return feat
+        return out.last_hidden_state
 
     def embed(self, x):
         feat = self.extract_backbone(x)
+        print(feat.shape)
 
         if self.attention == 'd':
             att1 = self.cam(feat)
@@ -121,8 +130,6 @@ class Network_Resnet(nn.Module):
             in_chan = 1024
         elif self.attention == 'dsb':
             in_chan = 2048
-        if self.bf == 't':
-            in_chan += 512
         self.orchesta = FeatureFusionModule(in_chan, 3*512, self.attention)
 
         self.fc = nn.Linear(3*512, embedding_dim, bias=False)  
