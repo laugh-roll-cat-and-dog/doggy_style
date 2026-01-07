@@ -68,7 +68,6 @@ class Network_ConvNext(nn.Module):
 
     def embed(self, x):
         feat = self.extract_backbone(x)
-        print(feat.shape)
 
         if self.attention == 'd':
             att1 = self.cam(feat)
@@ -95,7 +94,7 @@ class Network_ConvNext(nn.Module):
         else:
             x = self.fc_att(fused)
         x = self.ln(x)
-        x = F.normalize(x, p=2, dim=1)
+        # x = F.normalize(x, p=2, dim=1)
         return x
 
     def forward(self, img):
