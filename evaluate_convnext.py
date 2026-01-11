@@ -16,7 +16,7 @@ from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str, metavar="attention",
+parser.add_argument('-a', '--attention', default='sb', choices=['s', 'b', 'sb', 'n'], type=str, metavar="attention",
                     help='attention module')
 parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
                     help='backbone')

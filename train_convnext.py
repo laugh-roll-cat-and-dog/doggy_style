@@ -16,7 +16,7 @@ from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb', 'n'], type=str, metavar="attention",
+parser.add_argument('-a', '--attention', default='sb', choices=['s', 'b', 'sb', 'n'], type=str, metavar="attention",
                     help='attention module')
 parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
                     help='backbone')
@@ -122,58 +122,37 @@ if args.dataset == 'face':
     train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
     val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
 
-elif args.dataset == 'nose':
-    class DogDataset(Dataset):
-        def __init__(self, csv_file, root_dir="", transform=None):
-            self.df = pd.read_csv(csv_file)
-            self.root_dir = root_dir
-            self.transform = transform
-
-        def __len__(self):
-            return len(self.df)
-        
-        def __getitem__(self, index):
-            # Read row
-            img_name = self.df.loc[index, 'filepath']
-            label = self.df.loc[index, 'label']
-            img_name = img_name.replace('\\', '/')
-            img_path = os.path.join(self.root_dir, img_name) if self.root_dir else img_name
-
-            try:
-                image = Image.open(img_path).convert('RGB')
-            except Exception as e:
-                raise RuntimeError(f"Error loading image: {img_path} — {e}")
-
-            if self.transform:
-                image = self.transform(image)
-            
-            return image, torch.tensor(label, dtype=torch.long)
-        
-    train_dataset_1 = DogDataset(csv_file='dogNose_train.csv', transform=train_transforms_2)
-    train_dataset_2 = DogDataset(csv_file='dogNose_train.csv', transform=val_transforms)
-    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
-    val_dataset = DogDataset(csv_file='dogNose_test.csv', transform=val_transforms)
-
 else:
     class DogDataset(Dataset):
-        def __init__(self, root_dir, transform=None):
+        def __init__(self, root_dir, split="train", transform=None):
             self.root_dir = root_dir
+            self.split = split
             self.transform = transform
             self.samples = []
 
             for class_name in sorted(os.listdir(root_dir)):
-                class_path = os.path.join(root_dir, class_name)
-
-                if not os.path.isdir(class_path):
+                class_dir = os.path.join(root_dir, class_name)
+                if not os.path.isdir(class_dir):
                     continue
 
-                label = int(class_name)
+                try:
+                    label = int(class_name)
+                    if label >= args.c:
+                        continue
+                except:
+                    continue
 
-                for fname in os.listdir(class_path):
-                    fpath = os.path.join(class_path, fname)
+                for root, dirs, files in os.walk(class_dir):
+                    if os.path.basename(root) != split:
+                        continue
 
-                    if os.path.isfile(fpath):
-                        self.samples.append((fpath, label))
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            self.samples.append((fpath, label))
+
+            if len(self.samples) == 0:
+                raise ValueError(f"No images found for split='{split}' in {root_dir}")
 
         def __len__(self):
             return len(self.samples)
@@ -186,12 +165,12 @@ else:
                 image = self.transform(image)
 
             return image, label
-    train_dataset_1 = DogDataset('dataset/train', transform=train_transforms_3)
-    train_dataset_2 = DogDataset('dataset/train', transform=train_transforms_4)
-    train_dataset_3 = DogDataset('dataset/train', transform=train_transforms_5)
-    train_dataset_4 = DogDataset('dataset/train', transform=val_transforms)
+    train_dataset_1 = DogDataset('crop', transform=train_transforms_3)
+    train_dataset_2 = DogDataset('crop', transform=train_transforms_4)
+    train_dataset_3 = DogDataset('crop', transform=train_transforms_5)
+    train_dataset_4 = DogDataset('crop', transform=val_transforms)
     train_dataset = ConcatDataset([train_dataset_1, train_dataset_2, train_dataset_3, train_dataset_4])
-    val_dataset = DogDataset('dataset/validate', transform=val_transforms)
+    val_dataset = DogDataset('crop', 'test', transform=val_transforms)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
@@ -284,7 +263,7 @@ def train():
         param_groups.append({"params": soft_triple_loss_1.parameters()})
         param_groups.append({"params": soft_triple_loss_2.parameters()})
         param_groups.append({"params": soft_triple_loss_3.parameters()})
-    optimizer = AdamW(param_groups, lr=0.0001, weight_decay=1e-4)
+    optimizer = AdamW(param_groups, lr=3.5e-5, weight_decay=1e-4)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
