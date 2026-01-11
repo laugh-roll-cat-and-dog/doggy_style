@@ -3,23 +3,14 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 import torch
-import torch.nn as nn
-import torchvision.models as models
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
-from torch.nn import init
 import math
 import numpy as np
 import argparse
-from sklearn.metrics import accuracy_score
-from transformers import AutoImageProcessor, ConvNextV2ForImageClassification
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 import os
 
-from attention.BAM import BAM
-from attention.DAM import ChannelAttentionModule, PositionAttentionModule, DualAttentionModule
-from attention.SAM import Self_Attention
-from attention.SEblock import FeatureFusionModule
+from network.network import Network_Resnet, Network_ConvNext
 
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
@@ -27,8 +18,8 @@ from loss.softTriple import SoftTriple
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb'], type=str, metavar="attention",
                     help='attention module')
-parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
-                    help='concat backbone feature maps to last feature maps')
+parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
+                    help='backbone')
 parser.add_argument('-c', type=int, metavar="class",
                     help='number of class')
 parser.add_argument('-m', '--model', type=str, metavar="model",
@@ -79,109 +70,57 @@ if args.dataset == 'face':
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 else:
     class DogDataset(Dataset):
-        def __init__(self,csv_file, transform=None):
-            self.df = pd.read_csv(csv_file)
+        def __init__(self, root_dir, split="train", transform=None):
+            self.root_dir = root_dir
+            self.split = split
             self.transform = transform
+            self.samples = []
+
+            for class_name in sorted(os.listdir(root_dir)):
+                class_dir = os.path.join(root_dir, class_name)
+                if not os.path.isdir(class_dir):
+                    continue
+
+                try:
+                    label = int(class_name)
+                    if label < 38:
+                        continue
+                except:
+                    continue
+
+                for root, dirs, files in os.walk(class_dir):
+                    if os.path.basename(root) != split:
+                        continue
+
+                    for i, fname in enumerate(files):
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            if split == 'train' and i >= 5:
+                                continue
+                            self.samples.append((fpath, label))
+
+
+            if len(self.samples) == 0:
+                raise ValueError(f"No images found for split='{split}' in {root_dir}")
 
         def __len__(self):
-            return len(self.df)
-        
+            return len(self.samples)
+
         def __getitem__(self, index):
-            img_path = self.df.loc[index,'filename']
-            img_path = os.path.join("dog_nose_2022", img_path)
-            label = self.df.loc[index,'new_dog_id']
-            image = Image.open(img_path).convert('RGB')
+            img_path, label = self.samples[index]
+            image = Image.open(img_path).convert("RGB")
 
             if self.transform:
                 image = self.transform(image)
-            
+
             return image, label
-    val_dataset = DogDataset(csv_file='validation.csv', transform=val_transforms)
+    val_dataset = DogDataset('crop', 'test', transform=val_transforms)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-    gallery_dataset = DogDataset(csv_file='training.csv', transform=val_transforms)
+    gallery_dataset = DogDataset('crop', transform=val_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
-## NN
-class Network(nn.Module):
-    def __init__(self, embedding_dim=1024):
-        super().__init__()
-        model_name = "facebook/convnextv2-tiny-1k-224"
-        base_model = ConvNextV2ForImageClassification.from_pretrained(model_name)
-
-        self.backbone = base_model.convnextv2
-        num_features = base_model.classifier.in_features
-        for name, param in self.backbone.named_parameters():
-            if 'stages.3' in name or 'convnextv2.layernorm' in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        self.cam = ChannelAttentionModule()
-        self.pam = PositionAttentionModule(num_features)
-        self.dam = DualAttentionModule(in_channels=num_features)
-        self.sam = Self_Attention(num_features)
-        self.bam = BAM(num_features)
-        
-        in_chan = 0
-        if args.attention == 'sb' or args.attention == 'd':
-            in_chan = num_features * 2
-        elif args.attention == 'dsb':
-            in_chan = num_features * 4
-        else:
-            in_chan = num_features
-
-        if args.bf == 't':
-            in_chan += num_features
-
-        self.orchestra = FeatureFusionModule(
-            in_chan=in_chan,
-            out_chan=2 * num_features,
-            attention=args.attention,
-            bf=args.bf
-        )
-
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(2 * num_features, embedding_dim, bias=False)
-        self.ln = nn.LayerNorm(embedding_dim)
-
-    def extract_backbone(self, x):
-        out = self.backbone(x)
-        features = out.last_hidden_state
-        return features
-
-    def embed(self, x):
-        feat = self.extract_backbone(x)
-
-        if args.attention == 'd':
-            att1 = self.cam(feat)
-            att2 = self.pam(feat)
-            fused = self.orchestra(cam=att1, pam=att2, x=feat)
-        elif args.attention == 'sb':
-            att1 = self.sam(feat)
-            att2 = self.bam(feat)
-            fused = self.orchestra(fsp=att1, fcp=att2, x=feat)
-        elif args.attention == 'dsb':
-            att1 = self.cam(feat)
-            att2 = self.pam(feat)
-            att3 = self.sam(feat)
-            att4 = self.bam(feat)
-            fused = self.orchestra(cam=att1, pam=att2, fsp=att3, fcp=att4, x=feat)
-        else:
-            fused = feat
-
-        fused = self.gap(fused)
-        fused = fused.view(fused.size(0), -1)
-
-        x = self.fc(fused)
-        x = self.ln(x)
-        x = F.normalize(x, p=2, dim=1)
-        return x
-
-    def forward(self, img):
-        return self.embed(img)
-
-def evaluate_embedding_metrics(test_embeddings, gallery_embeddings,output_prefix, top_k=5):
+def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
     gal_feats = []
     gal_labels = []
     for label, emb_list in gallery_embeddings.items():
@@ -204,11 +143,27 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings,output_prefix
     test_feats = F.normalize(test_feats, p=2, dim=1)
     test_labels_true = torch.tensor(test_labels).to(device)
 
+    # 1. Compute Similarity Matrix
     sim_matrix = torch.matmul(test_feats, gal_feats.T)
 
+    # 2. Get Top-K Predictions
     topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
-
     pred_labels = gal_labels[topk_indices]
+
+    # --- NEW BLOCK: Calculate Max Score for the True Class ---
+    # Create a mask where (Test_i, Gal_j) is True if they have the same label
+    # Shape: [num_test, num_gallery]
+    label_mask = test_labels_true.unsqueeze(1) == gal_labels.unsqueeze(0)
+
+    # Clone matrix to mask out wrong classes without affecting original sim_matrix
+    masked_sim = sim_matrix.clone()
+    
+    # Set scores of non-matching classes to -infinity so they are ignored by max()
+    masked_sim[~label_mask] = -float('inf')
+
+    # Get the max similarity score for the true label for each test image
+    true_class_scores = masked_sim.max(dim=1)[0]
+    # ---------------------------------------------------------
 
     correct = pred_labels.eq(test_labels_true.view(-1, 1).expand_as(pred_labels))
 
@@ -226,6 +181,9 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings,output_prefix
 
     y_true = test_labels_true.cpu().numpy()
     y_pred = pred_labels[:, 0].cpu().numpy()
+    
+    # Convert true scores to CPU for saving
+    y_true_scores = true_class_scores.cpu().numpy()
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average='weighted', zero_division=0
@@ -255,46 +213,47 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings,output_prefix
 
     results_list = []
     for i in range(len(y_true)):
+        is_correct = (y_true[i] == pred_labels[i, 0].item())
+        
+        # Determine what to save for true_class_score
+        # If prediction is wrong, this value shows how confident the model was about the RIGHT answer
+        t_score = y_true_scores[i]
+        
+        # Handle edge case: if t_score is -inf (meaning true class wasn't in gallery), set to -1
+        if t_score == -float('inf'):
+            t_score = -1.0
+
         row = {
             'true_id': y_true[i],
             'pred_top1': pred_labels[i, 0].item(),
+            'is_correct': is_correct,
+            'score_top1': topk_scores[i, 0].item(),      # Score of the predicted class
+            'score_true_class': t_score,                 # Score of the actual correct class
             'pred_top2': pred_labels[i, 1].item() if top_k >=2 else -1,
             'pred_top3': pred_labels[i, 2].item() if top_k >=3 else -1,
             'pred_top4': pred_labels[i, 3].item() if top_k >=4 else -1,
             'pred_top5': pred_labels[i, 4].item() if top_k >=5 else -1,
-            'score_top1': topk_scores[i, 0].item()
         }
         results_list.append(row)
     
     df_results = pd.DataFrame(results_list)
-    df_results['is_correct'] = df_results['true_id'] == df_results['pred_top1']
+    
+    # Optional: Calculate the margin (Confidence Gap)
+    # This helps you sort by "Most Confident Errors"
+    df_results['confidence_gap'] = df_results['score_top1'] - df_results['score_true_class']
+
     preds_filename = f"result_csv/{output_prefix}_predictions.csv"
     df_results.to_csv(preds_filename, index=False)
     return df_results
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = Network().to(device)
-model.load_state_dict(torch.load(f"{args.model}.pt", map_location=device))
+if args.backbone == 'resnet':
+    model = Network_Resnet(args.attention).to(device)
+else:
+    model = Network_ConvNext(args.backbone, args.attention).to(device)
+model.load_state_dict(torch.load(f"model/model/{args.backbone}/{args.model}.pt", map_location=device))
 model.eval()
-
-arcface, softtriple_1 = None, None
-if 'a' in args.loss:
-    arcface = ArcFace(1024, int(args.c)).to(device)
-    arcface.load_state_dict(torch.load(f"{args.model}_arcface.pt", map_location=device))
-    arcface.eval()
-
-if 's' in args.loss:
-    
-    softtriple_1 = SoftTriple(8, 0.1, 0.1, 0.03, 1024, int(args.c), 2).to(device)
-    softtriple_2 = SoftTriple(10, 0.1, 0.1, 0.02, 1024, int(args.c), 2).to(device)
-    softtriple_3 = SoftTriple(12, 0.1, 0.1, 0.01, 1024, int(args.c), 2).to(device)
-    softtriple_1.load_state_dict(torch.load(f"{args.model}_soft_ensemble_1.pt", map_location=device))
-    softtriple_2.load_state_dict(torch.load(f"{args.model}_soft_ensemble_2.pt", map_location=device))
-    softtriple_3.load_state_dict(torch.load(f"{args.model}_soft_ensemble_3.pt", map_location=device))
-    softtriple_1.eval()
-    softtriple_2.eval()
-    softtriple_3.eval()
 
 result = []
 
@@ -327,23 +286,6 @@ with torch.no_grad():
                 test_embeddings[lbl2] = [emb2]
             else:
                 test_embeddings[lbl2].append(emb2)
-
-        combined_logits = 0.0
-        if arcface is not None:
-            logits_a = arcface(emb, dog_id)
-            combined_logits += torch.softmax(logits_a, dim=1)
-
-        if softtriple_1 is not None:
-            logits_s = softtriple_1(emb)
-            logits_s += softtriple_2(emb)
-            logits_s += softtriple_3(emb)
-            combined_logits += torch.softmax(logits_s, dim=1)
-
-        if arcface is not None and softtriple_1 is not None:
-            combined_logits /= 2.0
-
-        pred_prob = torch.softmax(combined_logits, dim=1)
-        top5_prob, top5_idx = torch.topk(pred_prob, k=5, dim=1)
 
 df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, args.output, top_k=5)
 
