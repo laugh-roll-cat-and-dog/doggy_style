@@ -42,12 +42,13 @@ class Network_ConvNext(nn.Module):
 
         self.orchestra = FeatureFusionModule(
             in_chan=in_chan,
-            out_chan=num_features,
+            out_chan=3*num_features,
             attention=attention,
         )
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(num_features, embedding_dim, bias=False)
+        self.fc = nn.Linear(3*num_features, embedding_dim, bias=False)
+        self.fc_abl = nn.Linear(num_features, embedding_dim, bias=False)
         self.ln = nn.LayerNorm(embedding_dim)
 
     def extract_backbone(self, x):
@@ -80,8 +81,10 @@ class Network_ConvNext(nn.Module):
         fused = self.gap(fused)
         fused = fused.view(fused.size(0), -1)
 
-
-        x = self.fc(fused)
+        if self.attention == 'n':
+            x = self.fc_abl(fused)
+        else:
+            x = self.fc(fused)
         x = self.ln(x)
         # x = F.normalize(x, p=2, dim=1)
         return x
@@ -143,7 +146,7 @@ class Network_Resnet(nn.Module):
         x = self.fc(x)             
         x = self.bn(x)
 
-        x = F.normalize(x, p=2, dim=1)
+        # x = F.normalize(x, p=2, dim=1)
         return x
 
     def forward(self, img):
