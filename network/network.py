@@ -81,10 +81,10 @@ class Network_ConvNext(nn.Module):
         fused = self.gap(fused)
         fused = fused.view(fused.size(0), -1)
 
-        if self.attention == 'n':
-            x = self.fc_abl(fused)
-        else:
+        if self.attention == 'sb':
             x = self.fc(fused)
+        else:
+            x = self.fc_abl(fused)
         x = self.ln(x)
         # x = F.normalize(x, p=2, dim=1)
         return x
