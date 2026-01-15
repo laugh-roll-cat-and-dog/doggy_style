@@ -35,22 +35,20 @@ class Network_ConvNext(nn.Module):
         self.bam = BAM(num_features)
         
         in_chan = 0
-        if attention == 'sb' or attention == 'd':
+        if attention == 'sb':
             in_chan = num_features * 2
-        elif attention == 'dsb':
-            in_chan = num_features * 4
         else:
             in_chan = num_features
 
         self.orchestra = FeatureFusionModule(
             in_chan=in_chan,
-            out_chan=3 * num_features,
+            out_chan=3*num_features,
             attention=attention,
         )
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(num_features, embedding_dim, bias=False)
-        self.fc_att = nn.Linear(3 * num_features, embedding_dim, bias=False)
+        self.fc = nn.Linear(3*num_features, embedding_dim, bias=False)
+        self.fc_abl = nn.Linear(num_features, embedding_dim, bias=False)
         self.ln = nn.LayerNorm(embedding_dim)
 
     def extract_backbone(self, x):
@@ -68,34 +66,27 @@ class Network_ConvNext(nn.Module):
 
     def embed(self, x):
         feat = self.extract_backbone(x)
-        print(feat.shape)
 
-        if self.attention == 'd':
-            att1 = self.cam(feat)
-            att2 = self.pam(feat)
-            fused = self.orchestra(cam=att1, pam=att2)
+        if self.attention == 's':
+            fused = self.sam(feat)
+        elif self.attention == 'b':
+            fused = self.bam(feat)
         elif self.attention == 'sb':
             att1 = self.sam(feat)
             att2 = self.bam(feat)
             fused = self.orchestra(fsp=att1, fcp=att2)
-        elif self.attention == 'dsb':
-            att1 = self.cam(feat)
-            att2 = self.pam(feat)
-            att3 = self.sam(feat)
-            att4 = self.bam(feat)
-            fused = self.orchestra(cam=att1, pam=att2, fsp=att3, fcp=att4)
         else:
             fused = feat
 
         fused = self.gap(fused)
         fused = fused.view(fused.size(0), -1)
 
-        if self.attention == 'n':
+        if self.attention == 'sb':
             x = self.fc(fused)
         else:
-            x = self.fc_att(fused)
+            x = self.fc_abl(fused)
         x = self.ln(x)
-        x = F.normalize(x, p=2, dim=1)
+        # x = F.normalize(x, p=2, dim=1)
         return x
 
     def forward(self, img):
@@ -128,26 +119,34 @@ class Network_Resnet(nn.Module):
         in_chan = 0
         if self.attention == 'sb':
             in_chan = 1024
-        elif self.attention == 'dsb':
-            in_chan = 2048
-        self.orchesta = FeatureFusionModule(in_chan, 3*512, self.attention)
+        else:
+            in_chan = 512
+        self.orchestra = FeatureFusionModule(
+            in_chan=in_chan,
+            out_chan=512,
+            attention=attention,
+        )
 
-        self.fc = nn.Linear(3*512, embedding_dim, bias=False)  
+        self.fc = nn.Linear(512, embedding_dim, bias=False)  
         self.bn = nn.BatchNorm1d(embedding_dim)
 
     def embed(self, x):
         x = self.backbone(x)
         x = self.extra_layers(x)   
-        if self.attention == 'd':
-            x = self.dam(x)                 
-        else:
-            x = self.orchesta(self.sam(x), self.bam(x), self.cam(x), self.pam(x))
+        if self.attention == 's':
+            x = self.sam(x)
+        elif self.attention == 'b':
+            x = self.bam(x)
+        elif self.attention == 'sb':
+            att1 = self.sam(x)
+            att2 = self.bam(x)
+            x = self.orchestra(fsp=att1, fcp=att2)
         x = self.gap(x)
         x = x.view(x.size(0), -1)      
         x = self.fc(x)             
         x = self.bn(x)
 
-        x = F.normalize(x, p=2, dim=1)
+        # x = F.normalize(x, p=2, dim=1)
         return x
 
     def forward(self, img):
