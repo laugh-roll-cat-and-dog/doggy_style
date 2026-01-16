@@ -62,17 +62,18 @@ def verification(model, pairs_csv_path, transform, device):
 
     def get_tar_at_far(target_far):
         idx = np.where(fpr <= target_far)[0][-1]
-        return tpr[idx]
+        strict_thresholds = thresholds[idx]
+        return tpr[idx], strict_thresholds
 
-    tar_01 = get_tar_at_far(0.01)
-    tar_001 = get_tar_at_far(0.001)
+    tar, strict_threshold = get_tar_at_far(0.001)
+    strict_threshold = tar
 
     print("="*30)
     print("ผลการตรวจสอบ:")
+    print(f"Threshold for gallery: {strict_threshold}")
     print(f"AUC Score:  {roc_auc:.4f}")
     print(f"EER:        {eer:.4f}")
-    print(f"Target Rate at FAR=0.01: {tar_01:.4f}")
-    print(f"Target Rate at FAR=0.001: {tar_001:.4f}")
+    print(f"Target Rate at FAR=0.001: {tar:.4f}")
 
     plt.figure(figsize=(10, 6))
 

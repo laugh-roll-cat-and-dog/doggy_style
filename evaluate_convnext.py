@@ -14,6 +14,8 @@ from network.network import Network_Resnet, Network_ConvNext
 
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
+from verification import verification
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='sb', choices=['s', 'b', 'sb', 'n'], type=str, metavar="attention",
@@ -83,8 +85,8 @@ else:
 
                 try:
                     label = int(class_name)
-                    if label < 38:
-                        continue
+                    # if label <= 39:
+                    #     continue
                 except:
                     continue
 
@@ -114,10 +116,10 @@ else:
                 image = self.transform(image)
 
             return image, label
-    val_dataset = DogDataset('crop', 'test', transform=val_transforms)
+    val_dataset = DogDataset(r'C:\Users\watsa\OneDrive\Desktop\assignment\Y4S2\ce project 2\dognose', 'test', transform=val_transforms)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-    gallery_dataset = DogDataset('crop', transform=val_transforms)
+    gallery_dataset = DogDataset(r'C:\Users\watsa\OneDrive\Desktop\assignment\Y4S2\ce project 2\dognose', transform=val_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
 def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
@@ -249,13 +251,19 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if args.backbone == 'resnet':
-    model = Network_Resnet(args.attention).to(device)
+    model = Network_Resnet(args.attention,string='test').to(device)
 else:
     model = Network_ConvNext(args.backbone, args.attention).to(device)
-model.load_state_dict(torch.load(f"model/model/{args.backbone}/{args.model}.pt", map_location=device))
+model.load_state_dict(torch.load(f"{args.model}.pt", map_location=device))
 model.eval()
 
 result = []
+
+#Verification
+print("Starting verification...")
+if os.path.exists('test_pairs.csv'):
+    print("Verifying on test_pairs.csv...")
+    verification(model, 'test_pairs.csv', val_transforms, device)
 
 with torch.no_grad():
     #gallery

@@ -93,11 +93,13 @@ class Network_ConvNext(nn.Module):
         return self.embed(img)
 
 class Network_Resnet(nn.Module):
-    def __init__(self, attention, embedding_dim=1024):
+    def __init__(self, attention, embedding_dim=1024, string='test'):
         super().__init__()
         self.attention = attention
         resnet = models.resnet50()
-        resnet.load_state_dict((torch.load("byol_stan.pt", map_location="cuda")))
+        if string != 'test':
+            resnet.load_state_dict((torch.load("byol_stan.pt", map_location="cuda")))
+
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
         self.extra_layers = nn.Sequential(
