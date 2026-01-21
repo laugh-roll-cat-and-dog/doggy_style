@@ -65,15 +65,15 @@ def verification(model, pairs_csv_path, transform, device):
         strict_thresholds = thresholds[idx]
         return tpr[idx], strict_thresholds
 
-    tar, strict_threshold = get_tar_at_far(0.001)
-    strict_threshold = tar
+    tar, strict_threshold = get_tar_at_far(0.01)
 
     print("="*30)
     print("ผลการตรวจสอบ:")
     print(f"Threshold for gallery: {strict_threshold}")
     print(f"AUC Score:  {roc_auc:.4f}")
     print(f"EER:        {eer:.4f}")
-    print(f"Target Rate at FAR=0.001: {tar:.4f}")
+    print(f"Target Rate at FAR: {tar:.4f}")
+    print("="*30)
 
     plt.figure(figsize=(10, 6))
 
@@ -91,6 +91,6 @@ def verification(model, pairs_csv_path, transform, device):
     plt.grid(True, linestyle='--', alpha=0.7)
 
     plt.savefig('similarity_score_distribution.png')
-    print("บันทึกกราฟ Histogram ไว้ที่: verification_score_dist.png")
+    print("บันทึกกราฟ Histogram ไว้ที่: similarity_score_distribution.png")
 
     return roc_auc, eer

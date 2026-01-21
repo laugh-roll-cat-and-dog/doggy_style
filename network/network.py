@@ -48,7 +48,7 @@ class Network_ConvNext(nn.Module):
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(3*num_features, embedding_dim, bias=False)
-        self.fc_abl = nn.Linear(num_features, embedding_dim, bias=False)
+        # self.fc_abl = nn.Linear(num_features, embedding_dim, bias=False)
         self.ln = nn.LayerNorm(embedding_dim)
 
     def extract_backbone(self, x):
