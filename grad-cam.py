@@ -2,7 +2,7 @@ import torch
 import cv2
 import numpy as np
 import argparse
-from network.network import Network
+from network.network import Network_ConvNext
 from pytorch_grad_cam import GradCAM, EigenCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image, preprocess_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
@@ -12,8 +12,8 @@ parser.add_argument('-m', '--model', type=str, metavar="model",
                     help=' model filename')
 parser.add_argument('-a', '--attention', default='d', choices=['d', 'sb', 'dsb', 'n'], type=str, metavar="attention",
                     help='attention module')
-parser.add_argument('-bf', choices=['t', 'f'], type=str, metavar="bf",
-                    help='concat backbone feature maps to last feature maps')
+parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
+                    help='backbone')
 args = parser.parse_args()
 
 class EmbeddingTarget:
@@ -28,7 +28,7 @@ class SimilarityTarget:
         return torch.sum(model_output * self.target_embedding)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = Network(args.attention, args.bf).to(device)
+model = Network_ConvNext(args.backbone, args.attention).to(device)
 # model.load_state_dict(torch.load(f"../model/convnextv2/3_d_orchestra/{args.model}.pt", map_location=device))
 model.load_state_dict(torch.load(f"{args.model}.pt", map_location=device))
 model.eval()
@@ -38,7 +38,7 @@ target_layers = [model.orchestra.convblk.conv_bn_relu[0]]
 
 cam = GradCAM(model=model, target_layers=target_layers)
 
-img_path_valid = "../dog/pet_biometric_challenge_2022/train/images/A_ZVriR7xLaJEAAAAAAAAAAAAAAQAAAQ.jpg"
+img_path_valid = "D:/dog_nose_id/new_doggy_style/crop/37/chaidai/15/test/36.jpg"
 # img_path_valid = "../dogFaces/BG_Brownies_7.jpg"
 rgb_img_valid = cv2.imread(img_path_valid, 1)[:, :, ::-1]
 rgb_img_valid = cv2.resize(rgb_img_valid, (224, 224))
@@ -47,7 +47,7 @@ input_tensor_valid = preprocess_image(rgb_img_valid,
                                 mean=[0.485, 0.456, 0.406],
                                 std=[0.229, 0.224, 0.225]).to(device)
 
-img_path_gallery = "../dog/pet_biometric_challenge_2022/train/images/A_wgjpSbOp8kcAAAAAAAAAAAAAAQAAAQ.jpg"
+img_path_gallery = "D:/dog_nose_id/new_doggy_style/crop/37/chaidai/15/train/45.jpg"
 # img_path_gallery = "../dogFaces/BG_Brownies_2.jpg"
 rgb_img_gallery = cv2.imread(img_path_gallery, 1)[:, :, ::-1]
 rgb_img_gallery = cv2.resize(rgb_img_gallery, (224, 224))

@@ -9,39 +9,84 @@ import numpy as np
 import argparse
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 import os
+import cv2
+from natsort import natsorted
 
 from network.network import Network_Resnet, Network_ConvNext
 
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
 
+RESOLUTION_LEVELS = {
+    "R0": 1.00,
+    "R1": 0.75,
+    "R2": 0.50,
+    "R3": 0.33,
+    "R4": 0.25,
+    "R5": 0.15,
+}
+
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--attention', default='sb', choices=['s', 'b', 'sb', 'n'], type=str, metavar="attention",
                     help='attention module')
 parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
                     help='backbone')
-parser.add_argument('-c', type=int, metavar="class",
-                    help='number of class')
 parser.add_argument('-m', '--model', type=str, metavar="model",
                     help=' model filename')
-# parser.add_argument('-ah', '--arcface', type=str, metavar="arcface",
-#                     help='arcface classifier head filename')
-# parser.add_argument('-sh', '--softtriple', type=str, metavar="softtriple",
-#                     help='softtriple classifier head filename')
+parser.add_argument('-r', '--resolution', choices=RESOLUTION_LEVELS.keys(), type=str, metavar="resolution",
+                    help='input resolution')
 parser.add_argument('-o', '--output', type=str, metavar="output",
                     help='output csv filename')
-parser.add_argument('-l', '--loss', choices=['a', 's', 'as'], type=str, metavar="loss",
-                    help='loss function')
 parser.add_argument('-d', '--dataset', choices=['face', 'nose', 'nose_old'], type=str, metavar="dataset",
                     help='what dataset to use')
 args = parser.parse_args()
 
-## Data
+## Resolution degrade
+class ResolutionDegradation:
+    def __init__(self, scale):
+        self.scale = scale
 
-val_transforms = transforms.Compose([
+    def __call__(self, img):
+        if self.scale == 1.0:
+            return img
+
+        img_np = np.array(img)  # HWC, RGB
+        h, w = img_np.shape[:2]
+
+        new_w = max(1, int(w * self.scale))
+        new_h = max(1, int(h * self.scale))
+
+        # Downscale (sensor simulation)
+        img_down = cv2.resize(
+            img_np, (new_w, new_h), interpolation=cv2.INTER_AREA
+        )
+
+        # Upscale back (ISP reconstruction)
+        img_up = cv2.resize(
+            img_down, (w, h), interpolation=cv2.INTER_CUBIC
+        )
+
+        return Image.fromarray(img_up)
+resolution_scale = RESOLUTION_LEVELS[args.resolution]
+
+## Data
+gallery_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+val_transforms = transforms.Compose([
+    ResolutionDegradation(scale=resolution_scale),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
 ])
 
 if args.dataset == 'face':
@@ -83,7 +128,7 @@ else:
 
                 try:
                     label = int(class_name)
-                    if label < 38:
+                    if label > 39:
                         continue
                 except:
                     continue
@@ -92,10 +137,10 @@ else:
                     if os.path.basename(root) != split:
                         continue
 
-                    for i, fname in enumerate(files):
+                    for i, fname in enumerate(natsorted(files)):
                         fpath = os.path.join(root, fname)
                         if os.path.isfile(fpath):
-                            if split == 'train' and i >= 5:
+                            if split == 'train' and i >= 4:
                                 continue
                             self.samples.append((fpath, label))
 
@@ -113,11 +158,12 @@ else:
             if self.transform:
                 image = self.transform(image)
 
-            return image, label
+            return image, label, img_path
+        
     val_dataset = DogDataset('crop', 'test', transform=val_transforms)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-    gallery_dataset = DogDataset('crop', transform=val_transforms)
+    gallery_dataset = DogDataset('crop', transform=gallery_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
 def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
@@ -134,10 +180,12 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
 
     test_feats = []
     test_labels = []
+    test_paths = []
     for label, emb_list in test_embeddings.items():
-        for emb in emb_list:
+        for emb, path in emb_list:
             test_feats.append(emb)
             test_labels.append(label)
+            test_paths.append(path)
 
     test_feats = torch.stack(test_feats).to(device)
     test_feats = F.normalize(test_feats, p=2, dim=1)
@@ -224,6 +272,7 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
             t_score = -1.0
 
         row = {
+            'filename': test_paths[i],
             'true_id': y_true[i],
             'pred_top1': pred_labels[i, 0].item(),
             'is_correct': is_correct,
@@ -261,7 +310,7 @@ with torch.no_grad():
     #gallery
     gallery_embeddings = {}
 
-    for i, (image, label) in enumerate(gallery_loader):
+    for i, (image, label, _) in enumerate(gallery_loader):
         img_set1 = image.to(device)
         output = model(img_set1)
 
@@ -275,7 +324,7 @@ with torch.no_grad():
 
     test_embeddings = {}
 
-    for (img, dog_id) in val_loader:
+    for (img, dog_id, img_path) in val_loader:
         img, dog_id = img.to(device), dog_id.to(device)
         emb = model(img)
 
@@ -283,11 +332,12 @@ with torch.no_grad():
             lbl2 = item2.item()
             emb2 = emb[idx2]
             if lbl2 not in test_embeddings:
-                test_embeddings[lbl2] = [emb2]
+                test_embeddings[lbl2] = [(emb2, img_path[idx2])]
             else:
-                test_embeddings[lbl2].append(emb2)
+                test_embeddings[lbl2].append((emb2, img_path[idx2]))
 
-df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, args.output, top_k=5)
+output_prefix = f"{args.output}_{args.resolution}"
+df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5)
 
 import numpy as np
 from sklearn.manifold import TSNE
@@ -306,14 +356,17 @@ print("Preparing data for Sorted Segmented t-SNE...")
 # 1. Flatten the dictionary into arrays (Full Dataset)
 embeddings_list = []
 labels_list = []
+paths_list = []   # OPTIONAL but very useful later
 
-for label, emb_tensors in test_embeddings.items():
-    for emb in emb_tensors:
+for label, emb_items in test_embeddings.items():
+    for emb, path in emb_items:
         embeddings_list.append(emb.cpu().numpy())
         labels_list.append(label)
+        paths_list.append(path)
 
 X_full = np.array(embeddings_list)
 y_full = np.array(labels_list)
+paths_full = np.array(paths_list)
 
 # 2. Get unique classes and SORT them numerically
 unique_classes = np.unique(y_full)
