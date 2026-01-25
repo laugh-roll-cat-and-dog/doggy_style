@@ -56,23 +56,27 @@ def verification(model, pairs_csv_path, transform, device):
 
     fpr, tpr, thresholds = roc_curve(labels, scores)
     roc_auc = auc(fpr, tpr)
-
     #EER (Equal Error Rate)
     eer = brentq(lambda x: 1. - x - interp1d(fpr, tpr)(x), 0., 1.)
+    threshold_at_eer = interp1d(fpr, thresholds)(eer)
 
     def get_tar_at_far(target_far):
         idx = np.where(fpr <= target_far)[0][-1]
         strict_thresholds = thresholds[idx]
-        return tpr[idx], strict_thresholds
+        return tpr[idx], fpr[idx], strict_thresholds
 
-    tar, strict_threshold = get_tar_at_far(0.01)
+    tar, far, strict_threshold = get_tar_at_far(0.01)
+    trr = 1 - far
+    avg_acc = (tar + trr) / 2
 
     print("="*30)
     print("ผลการตรวจสอบ:")
-    print(f"Threshold for gallery: {strict_threshold}")
+    print(f"Threshold using FAR: {strict_threshold}")
+    print(f"Threshold using EER: {threshold_at_eer}")
     print(f"AUC Score:  {roc_auc:.4f}")
     print(f"EER:        {eer:.4f}")
-    print(f"Target Rate at FAR: {tar:.4f}")
+    print(f"TAR (VR) at FAR = {tar:.4f}")
+    print(f"avg_acc: {avg_acc:.4f}")
     print("="*30)
 
     plt.figure(figsize=(10, 6))
@@ -93,4 +97,4 @@ def verification(model, pairs_csv_path, transform, device):
     plt.savefig('similarity_score_distribution.png')
     print("บันทึกกราฟ Histogram ไว้ที่: similarity_score_distribution.png")
 
-    return roc_auc, eer
+    return threshold_at_eer, strict_threshold

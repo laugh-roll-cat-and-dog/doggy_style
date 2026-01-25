@@ -85,8 +85,8 @@ else:
 
                 try:
                     label = int(class_name)
-                    # if label <= 39:
-                    #     continue
+                    if label > 49:
+                        continue
                 except:
                     continue
 
@@ -122,7 +122,7 @@ else:
     gallery_dataset = DogDataset(r'C:\Users\watsa\OneDrive\Desktop\assignment\Y4S2\ce project 2\dognose', transform=val_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
-def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
+def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5, optimal_threshold=None):
     gal_feats = []
     gal_labels = []
     for label, emb_list in gallery_embeddings.items():
@@ -151,6 +151,23 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
     # 2. Get Top-K Predictions
     topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
     pred_labels = gal_labels[topk_indices]
+
+    if optimal_threshold is not None:
+        print(f"Applying threshold: {optimal_threshold}")
+
+        top1_scores = topk_scores[:, 0]
+        top1_preds = pred_labels[:, 0]
+        threshold_tensor = torch.as_tensor(optimal_threshold).to(device)
+        reject_mask = top1_scores < threshold_tensor
+
+        pred_labels_thresholded = pred_labels.clone()
+        pred_labels_thresholded[reject_mask, 0] = -1
+
+        correct_thresholded = pred_labels_thresholded.eq(test_labels_true.view(-1, 1).expand_as(pred_labels_thresholded))
+        top1_acc_thresholded = correct_thresholded[:, 0].float().mean().item() * 100
+
+        print(f"Top-1 Accuracy (after threshold): {top1_acc_thresholded:.2f}%")
+        print(f"Rejected Samples: {reject_mask.sum().item()} / {len(test_feats)}")
 
     # --- NEW BLOCK: Calculate Max Score for the True Class ---
     # Create a mask where (Test_i, Gal_j) is True if they have the same label
@@ -258,12 +275,14 @@ model.load_state_dict(torch.load(f"{args.model}.pt", map_location=device))
 model.eval()
 
 result = []
+eer_threshold = None 
+far_threshold = None
 
 #Verification
 print("Starting verification...")
 if os.path.exists('test_pairs.csv'):
     print("Verifying on test_pairs.csv...")
-    verification(model, 'test_pairs.csv', val_transforms, device)
+    eer_threshold, far_threshold = verification(model, 'test_pairs.csv', val_transforms, device)
 
 with torch.no_grad():
     #gallery
@@ -295,7 +314,7 @@ with torch.no_grad():
             else:
                 test_embeddings[lbl2].append(emb2)
 
-df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, args.output, top_k=5)
+df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, args.output, top_k=5, optimal_threshold=eer_threshold)
 
 import numpy as np
 from sklearn.manifold import TSNE
