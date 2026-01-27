@@ -7,7 +7,10 @@ import torch.nn.functional as F
 import math
 import numpy as np
 import argparse
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, roc_curve, auc
+from scipy.interpolate import interp1d
+from scipy.optimize import brentq
+import matplotlib.pyplot as plt
 import os
 import cv2
 from natsort import natsorted
@@ -115,7 +118,7 @@ if args.dataset == 'face':
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 else:
     class DogDataset(Dataset):
-        def __init__(self, root_dir, split="train", transform=None):
+        def __init__(self, root_dir, split="train", transform=None, class_num=45):
             self.root_dir = root_dir
             self.split = split
             self.transform = transform
@@ -128,7 +131,7 @@ else:
 
                 try:
                     label = int(class_name)
-                    if label > 39:
+                    if label > class_num - 1:
                         continue
                 except:
                     continue
@@ -142,6 +145,8 @@ else:
                         if os.path.isfile(fpath):
                             if split == 'train' and i >= 4:
                                 continue
+                            if label > 44:
+                                label = -1
                             self.samples.append((fpath, label))
 
 
@@ -162,6 +167,9 @@ else:
         
     val_dataset = DogDataset('crop', 'test', transform=val_transforms)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+
+    val_dataset_unknown = DogDataset('crop', 'test', transform=val_transforms, class_num=50)
+    val_loader_unknown = DataLoader(val_dataset_unknown, batch_size=16, shuffle=False)
 
     gallery_dataset = DogDataset('crop', transform=gallery_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
@@ -194,9 +202,31 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
     # 1. Compute Similarity Matrix
     sim_matrix = torch.matmul(test_feats, gal_feats.T)
 
+    eer_thr, far_thr = compute_identification_threshold(
+        sim_matrix,
+        test_labels_true,
+        gal_labels,
+        output_prefix,
+        target_far=0.01
+    )
+
     # 2. Get Top-K Predictions
     topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
     pred_labels = gal_labels[topk_indices]
+
+    top1_scores = topk_scores[:, 0]
+
+    # Accept / Reject decisions
+    accept_eer = top1_scores >= eer_thr
+    accept_far = top1_scores >= far_thr
+
+    # Threshold-aware predictions
+    # -1 means "Unknown / Not in database"
+    pred_eer = pred_labels[:, 0].clone()
+    pred_far = pred_labels[:, 0].clone()
+
+    pred_eer[~accept_eer] = -1
+    pred_far[~accept_far] = -1
 
     # --- NEW BLOCK: Calculate Max Score for the True Class ---
     # Create a mask where (Test_i, Gal_j) is True if they have the same label
@@ -213,6 +243,19 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
     true_class_scores = masked_sim.max(dim=1)[0]
     # ---------------------------------------------------------
 
+    y_binary = (pred_labels[:, 0] == test_labels_true).int().cpu().numpy()
+    y_scores = true_class_scores.cpu().numpy()
+
+    # Remove invalid entries (if any)
+    valid_mask = y_scores >= 0
+    y_binary = y_binary[valid_mask]
+    y_scores = y_scores[valid_mask]
+
+    fpr, tpr, roc_thr = roc_curve(y_binary, y_scores)
+    roc_auc = auc(fpr, tpr)
+
+    print(f"Closed-set ROC AUC: {roc_auc:.4f}")
+    
     correct = pred_labels.eq(test_labels_true.view(-1, 1).expand_as(pred_labels))
 
     top1_acc = correct[:, 0].float().mean().item() * 100
@@ -252,6 +295,7 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
         'precision': [precision],
         'recall': [recall],
         'f1_score': [f1],
+        'closed_set_auc': [roc_auc],
         'num_test_samples': [len(y_true)]
     }
     df_summary = pd.DataFrame(summary_data)
@@ -261,7 +305,15 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
 
     results_list = []
     for i in range(len(y_true)):
-        is_correct = (y_true[i] == pred_labels[i, 0].item())
+        is_correct_closed = (y_true[i] == pred_labels[i, 0].item())
+
+        is_correct_eer = (
+            pred_eer[i].item() == y_true[i]
+        )
+
+        is_correct_far = (
+            pred_far[i].item() == y_true[i]
+        )
         
         # Determine what to save for true_class_score
         # If prediction is wrong, this value shows how confident the model was about the RIGHT answer
@@ -274,17 +326,28 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
         row = {
             'filename': test_paths[i],
             'true_id': y_true[i],
+
+            # Closed-set
             'pred_top1': pred_labels[i, 0].item(),
-            'is_correct': is_correct,
-            'score_top1': topk_scores[i, 0].item(),      # Score of the predicted class
-            'score_true_class': t_score,                 # Score of the actual correct class
-            'pred_top2': pred_labels[i, 1].item() if top_k >=2 else -1,
-            'pred_top3': pred_labels[i, 2].item() if top_k >=3 else -1,
-            'pred_top4': pred_labels[i, 3].item() if top_k >=4 else -1,
-            'pred_top5': pred_labels[i, 4].item() if top_k >=5 else -1,
+            'is_correct_closed': is_correct_closed,
+            'score_top1': topk_scores[i, 0].item(),
+
+            # Threshold-based (OPEN-SET)
+            'pred_eer': pred_eer[i].item(),
+            'pred_far': pred_far[i].item(),
+            'accept_eer': bool(accept_eer[i].item()),
+            'accept_far': bool(accept_far[i].item()),
+
+            # True class score (analysis)
+            'score_true_class': t_score,
         }
         results_list.append(row)
-    
+    open_set_acc_eer = np.mean([
+        r['is_correct_closed'] and r['accept_eer']
+        for r in results_list
+    ]) * 100
+
+    print(f"Open-set Accuracy (EER): {open_set_acc_eer:.2f}%")
     df_results = pd.DataFrame(results_list)
     
     # Optional: Calculate the margin (Confidence Gap)
@@ -293,7 +356,278 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
 
     preds_filename = f"result_csv/{output_prefix}_predictions.csv"
     df_results.to_csv(preds_filename, index=False)
-    return df_results
+    return df_results, eer_thr
+
+def compute_identification_threshold(
+    sim_matrix,
+    test_labels_true,
+    gal_labels,
+    output_prefix,
+    target_far=0.01
+):
+    """
+    Identification threshold using FAR–FRR intersection (EER).
+    This definition follows biometric verification standards.
+    """
+
+    # --- Positive & Negative scores ---
+    label_mask = test_labels_true.unsqueeze(1) == gal_labels.unsqueeze(0)
+
+    pos_sim = sim_matrix.clone()
+    pos_sim[~label_mask] = -float('inf')
+    pos_scores = pos_sim.max(dim=1)[0].cpu().numpy()
+
+    neg_sim = sim_matrix.clone()
+    neg_sim[label_mask] = -float('inf')
+    neg_scores = neg_sim.max(dim=1)[0].cpu().numpy()
+
+    scores = np.concatenate([pos_scores, neg_scores])
+    labels = np.concatenate([
+        np.ones_like(pos_scores),
+        np.zeros_like(neg_scores)
+    ])
+
+    # --- ROC ---
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+
+    far = fpr
+    frr = 1 - tpr
+
+    # Sort by threshold
+    order = np.argsort(thresholds)
+    thr = thresholds[order]
+    far = far[order]
+    frr = frr[order]
+
+    diff = far - frr
+    idx = np.where(np.diff(np.sign(diff)) != 0)[0]
+
+    if len(idx) == 0:
+        # fallback (rare, but safe)
+        eer_idx = np.argmin(np.abs(diff))
+        eer_thr = thr[eer_idx]
+        eer = (far[eer_idx] + frr[eer_idx]) / 2
+    else:
+        i = idx[0]
+        x0, x1 = thr[i], thr[i + 1]
+        y0, y1 = diff[i], diff[i + 1]
+
+        eer_thr = x0 - y0 * (x1 - x0) / (y1 - y0)
+        eer = np.interp(eer_thr, thr, far)
+
+    # FAR-based threshold (optional secondary operating point)
+    far_idx = np.where(fpr <= target_far)[0][-1]
+    far_threshold = thresholds[far_idx]
+
+    # --- Plot ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(thr, far, label="FAR", linewidth=2)
+    plt.plot(thr, frr, label="FRR", linewidth=2)
+
+    plt.scatter(eer_thr, eer, color="red", zorder=5, label=f"EER = {eer:.4f}")
+    plt.axvline(eer_thr, color="red", linestyle="--", alpha=0.7)
+
+    plt.yscale("log")
+    plt.ylim(1e-2, 1)
+    plt.xlabel("Similarity Threshold")
+    plt.ylabel("Error Rate")
+    plt.title("FAR–FRR Intersection (EER)")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+
+    plt.savefig(f"result_csv/{output_prefix}_eer_intersection.png")
+    plt.close()
+
+    print("=" * 30)
+    print("Identification Thresholds")
+    print(f"EER (intersection): {eer:.4f}")
+    print(f"EER Threshold     : {eer_thr:.4f}")
+    print(f"FAR@{target_far} Threshold: {far_threshold:.4f}")
+    print("=" * 30)
+
+    return eer_thr, far_threshold
+
+
+def evaluate_open_set(
+    test_embeddings,
+    gallery_embeddings,
+    threshold,          # <-- EER threshold
+    output_prefix,
+    device="cuda",
+    top_k=5
+):
+    import pandas as pd
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    from sklearn.metrics import roc_curve, auc
+    import matplotlib.pyplot as plt
+
+    # -----------------------------
+    # Prepare gallery
+    # -----------------------------
+    gal_feats, gal_labels = [], []
+
+    for label, emb_list in gallery_embeddings.items():
+        for emb in emb_list:
+            gal_feats.append(emb)
+            gal_labels.append(label)
+
+    gal_feats = F.normalize(torch.stack(gal_feats), dim=1).to(device)
+    gal_labels = torch.tensor(gal_labels).to(device)
+
+    # -----------------------------
+    # Prepare test
+    # -----------------------------
+    test_feats, test_labels, test_paths = [], [], []
+
+    for label, emb_list in test_embeddings.items():
+        for emb, path in emb_list:
+            test_feats.append(emb)
+            test_labels.append(label)  # unknown = -1
+            test_paths.append(path)
+
+    test_feats = F.normalize(torch.stack(test_feats), dim=1).to(device)
+    test_labels = torch.tensor(test_labels).to(device)
+
+    # -----------------------------
+    # Similarity
+    # -----------------------------
+    sim_matrix = torch.matmul(test_feats, gal_feats.T)
+    topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
+
+    top1_scores = topk_scores[:, 0]
+    pred_labels = gal_labels[topk_indices[:, 0]]
+
+    # Accept / Reject using EER threshold
+    accept = top1_scores >= threshold
+    pred_open = pred_labels.clone()
+    pred_open[~accept] = -1
+
+    # -----------------------------
+    # Per-sample results
+    # -----------------------------
+    rows = []
+    for i in range(len(test_labels)):
+        true_id = test_labels[i].item()
+        pred_id = pred_open[i].item()
+        score = top1_scores[i].item()
+
+        is_unknown = (true_id == -1)
+
+        if is_unknown:
+            is_correct = not accept[i]
+        else:
+            is_correct = accept[i] and (pred_id == true_id)
+
+        rows.append({
+            "filename": test_paths[i],
+            "true_id": true_id,
+            "pred_id": pred_id,
+            "score": score,
+            "accepted": bool(accept[i]),
+            "is_unknown": is_unknown,
+            "correct_open": is_correct
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(f"result_csv/{output_prefix}_open_set_samples.csv", index=False)
+
+
+    # Metrics (Known / Unknown)
+    # -----------------------------
+    known = df[df.true_id != -1]
+    unknown = df[df.true_id == -1]
+
+    # ---- Known ID metrics ----
+    known_total = len(known)
+
+    known_correct = (
+        (known.accepted == True) &
+        (known.pred_id == known.true_id)
+    ).sum()
+
+    known_false_reject = (
+        known.accepted == False
+    ).sum()
+
+    known_misid = (
+        (known.accepted == True) &
+        (known.pred_id != known.true_id)
+    ).sum()
+
+    known_acc = known_correct / known_total * 100 if known_total > 0 else np.nan
+    known_frr = known_false_reject / known_total * 100 if known_total > 0 else np.nan
+    known_mir = known_misid / known_total * 100 if known_total > 0 else np.nan
+
+    # ---- Unknown metrics ----
+    unknown_total = len(unknown)
+
+    far = unknown.accepted.mean() * 100 if unknown_total > 0 else np.nan
+    trr = 100 - far if not np.isnan(far) else np.nan
+
+
+    # -----------------------------
+    # ROC (threshold-free)
+    # -----------------------------
+    y_true = (df.true_id != -1).astype(int)  # 1 = known
+    y_score = df.score.values
+
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    roc_auc = auc(fpr, tpr)
+
+    # Plot ROC
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    plt.plot([0, 1], [0, 1], "--")
+    plt.xlabel("False Accept Rate (FAR)")
+    plt.ylabel("True Accept Rate (TAR)")
+    plt.title("Open-Set ROC Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"result_csv/{output_prefix}_open_set_roc.png")
+    plt.close()
+
+    # -----------------------------
+    # Summary CSV (paper-ready)
+    # -----------------------------
+    summary = pd.DataFrame([{
+        "threshold_type": "EER (FAR=FRR)",
+        "threshold": threshold,
+
+        # Known ID
+        "known_id_accuracy_%": known_acc,
+        "known_false_reject_rate_%": known_frr,
+        "known_misidentification_rate_%": known_mir,
+
+        # Unknown ID
+        "false_accept_rate_%": far,
+        "true_reject_rate_%": trr,
+
+        # Threshold-free
+        "open_set_roc_auc": roc_auc
+    }])
+
+
+    summary.to_csv(
+        f"result_csv/{output_prefix}_open_set_summary.csv",
+        index=False
+    )
+
+    # Console
+    print("=" * 40)
+    print("OPEN-SET IDENTIFICATION (EER THRESHOLD)")
+    print(f"Threshold                 : {threshold:.4f}")
+    print(f"Known-ID Accuracy         : {known_acc:.2f}%")
+    print(f"Known False Reject Rate   : {known_frr:.2f}%")
+    print(f"Known Mis-ID Rate         : {known_mir:.2f}%")
+    print(f"False Accept Rate (UNK)   : {far:.2f}%")
+    print(f"True Reject Rate  (UNK)   : {trr:.2f}%")
+    print(f"ROC AUC                   : {roc_auc:.4f}")
+    print("=" * 40)
+
+    return summary, df
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -336,8 +670,24 @@ with torch.no_grad():
             else:
                 test_embeddings[lbl2].append((emb2, img_path[idx2]))
 
+    test_embeddings_unknown = {}
+
+    for (img, dog_id, img_path) in val_loader_unknown:
+        img, dog_id = img.to(device), dog_id.to(device)
+        emb = model(img)
+
+        for i in range(len(dog_id)):
+            lbl = dog_id[i].item()
+            emb_i = emb[i]
+            if lbl not in test_embeddings_unknown:
+                test_embeddings_unknown[lbl] = [(emb_i, img_path[i])]
+            else:
+                test_embeddings_unknown[lbl].append((emb_i, img_path[i]))
+
 output_prefix = f"{args.output}_{args.resolution}"
-df_emb_eval = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5)
+df_emb_eval, eer_thr = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5)
+
+df_open_set = evaluate_open_set(test_embeddings_unknown, gallery_embeddings, eer_thr, output_prefix, top_k=5)
 
 import numpy as np
 from sklearn.manifold import TSNE
