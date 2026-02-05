@@ -15,6 +15,7 @@ from network.network import Network_Resnet, Network_ConvNext
 from loss.arcface import ArcFace
 from loss.softTriple import SoftTriple
 from verification import verification
+from benchmark import benchmark, measure_flops
 
 
 parser = argparse.ArgumentParser()
@@ -283,6 +284,11 @@ print("Starting verification...")
 if os.path.exists('test_pairs.csv'):
     print("Verifying on test_pairs.csv...")
     eer_threshold, far_threshold = verification(model, 'test_pairs.csv', val_transforms, device)
+
+# Benchmarking
+print("Starting benchmarking...")
+benchmark(model, device)
+measure_flops(model)
 
 with torch.no_grad():
     #gallery

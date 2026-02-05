@@ -27,7 +27,7 @@ model_config = {
     'none' : {'attention': 'none', "model_path": '../test_model/dino_ablation_none.pt'},
     's'    : {'attention': 's', "model_path": '../test_model/dino_ablation_sam.pt'},
     'b'    : {'attention': 'b', "model_path": '../test_model/dino_ablation_bam.pt'},
-    'sb'   : {'attention': 'sb', "model_path": '../test_model/dino_main.pt'},
+    'sb'   : {'attention': 'sb', "model_path": '../test_model/dino_main_50_class.pt'},
 }
 def run_visualization():
     loaded_models = {}

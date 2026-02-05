@@ -56,9 +56,12 @@ def verification(model, pairs_csv_path, transform, device):
 
     fpr, tpr, thresholds = roc_curve(labels, scores)
     roc_auc = auc(fpr, tpr)
+
     #EER (Equal Error Rate)
     eer = brentq(lambda x: 1. - x - interp1d(fpr, tpr)(x), 0., 1.)
     threshold_at_eer = interp1d(fpr, thresholds)(eer)
+
+    idx = np.argmin(np.abs(thresholds - threshold_at_eer))
 
     def get_tar_at_far(target_far):
         idx = np.where(fpr <= target_far)[0][-1]
@@ -66,8 +69,9 @@ def verification(model, pairs_csv_path, transform, device):
         return tpr[idx], fpr[idx], strict_thresholds
 
     tar, far, strict_threshold = get_tar_at_far(0.01)
-    trr = 1 - far
-    avg_acc = (tar + trr) / 2
+    trr = 1 - fpr[idx]
+    tar_at_eer = tpr[idx]
+    avg_acc = 1 - eer
 
     print("="*30)
     print("ผลการตรวจสอบ:")
