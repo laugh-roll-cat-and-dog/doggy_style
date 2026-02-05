@@ -124,6 +124,26 @@ else:
             self.transform = transform
             self.samples = []
 
+            if split == 'unknown':
+                unknown_dir = os.path.join(root_dir, 'unknown')
+            
+                if os.path.isdir(unknown_dir):
+                    # Walk specifically inside the 'unknown' folder
+                    for root, dirs, files in os.walk(unknown_dir):
+                        for fname in natsorted(files):
+                            fpath = os.path.join(root, fname)
+                            
+                            # Filter for valid image extensions
+                            if os.path.isfile(fpath) and fname.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                # Assign label -1 for unknown images
+                                self.samples.append((fpath, -1))
+                
+                    # Error handling if empty
+                if len(self.samples) == 0:
+                    print(f"Warning: No images found in '{unknown_dir}'")
+                
+                return
+
             for class_name in sorted(os.listdir(root_dir)):
                 class_dir = os.path.join(root_dir, class_name)
                 if not os.path.isdir(class_dir):
@@ -131,7 +151,7 @@ else:
 
                 try:
                     label = int(class_name)
-                    if label > class_num - 1:
+                    if label < 17:
                         continue
                 except:
                     continue
@@ -143,10 +163,8 @@ else:
                     for i, fname in enumerate(natsorted(files)):
                         fpath = os.path.join(root, fname)
                         if os.path.isfile(fpath):
-                            if split == 'train' and i >= 4:
+                            if split == 'gallery' and i >= 4:
                                 continue
-                            if label > 44:
-                                label = -1
                             self.samples.append((fpath, label))
 
 
@@ -165,13 +183,13 @@ else:
 
             return image, label, img_path
         
-    val_dataset = DogDataset('crop', 'test', transform=val_transforms)
+    val_dataset = DogDataset('crop_copy', 'test', transform=val_transforms)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-    val_dataset_unknown = DogDataset('crop', 'test', transform=val_transforms, class_num=50)
+    val_dataset_unknown = DogDataset('crop_copy', 'unknown', transform=val_transforms, class_num=50)
     val_loader_unknown = DataLoader(val_dataset_unknown, batch_size=16, shuffle=False)
 
-    gallery_dataset = DogDataset('crop', transform=gallery_transforms)
+    gallery_dataset = DogDataset('crop_copy', 'gallery', transform=gallery_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
 def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
@@ -381,10 +399,16 @@ def compute_identification_threshold(
     neg_sim[label_mask] = -float('inf')
     neg_scores = neg_sim.max(dim=1)[0].cpu().numpy()
 
+    valid_pos = np.isfinite(pos_scores)
+    valid_neg = np.isfinite(neg_scores)
+
+    pos_scores = pos_scores[valid_pos]
+    neg_scores = neg_scores[valid_neg]
+
     scores = np.concatenate([pos_scores, neg_scores])
     labels = np.concatenate([
-        np.ones_like(pos_scores),
-        np.zeros_like(neg_scores)
+        np.ones(len(pos_scores)),
+        np.zeros(len(neg_scores))
     ])
 
     # --- ROC ---
@@ -446,7 +470,6 @@ def compute_identification_threshold(
     print("=" * 30)
 
     return eer_thr, far_threshold
-
 
 def evaluate_open_set(
     test_embeddings,
@@ -628,7 +651,6 @@ def evaluate_open_set(
 
     return summary, df
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if args.backbone == 'resnet':
@@ -683,11 +705,22 @@ with torch.no_grad():
                 test_embeddings_unknown[lbl] = [(emb_i, img_path[i])]
             else:
                 test_embeddings_unknown[lbl].append((emb_i, img_path[i]))
+    test_embeddings_open = {}
+
+    for lbl, items in test_embeddings.items():
+        test_embeddings_open[lbl] = items.copy()
+
+    for lbl, items in test_embeddings_unknown.items():
+        if lbl not in test_embeddings_open:
+            test_embeddings_open[lbl] = items
+        else:
+            test_embeddings_open[lbl].extend(items)
+
 
 output_prefix = f"{args.output}_{args.resolution}"
 df_emb_eval, eer_thr = evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5)
 
-df_open_set = evaluate_open_set(test_embeddings_unknown, gallery_embeddings, eer_thr, output_prefix, top_k=5)
+df_open_set = evaluate_open_set(test_embeddings_open, gallery_embeddings, eer_thr, output_prefix, top_k=5)
 
 import numpy as np
 from sklearn.manifold import TSNE
