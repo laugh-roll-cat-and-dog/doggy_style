@@ -730,7 +730,7 @@ import matplotlib.patheffects as PathEffects
 import math
 
 # --- Configuration ---
-CLASSES_PER_PLOT = 45
+CLASSES_PER_PLOT = 60
 random_seed = 42 
 # ---------------------
 
@@ -789,7 +789,7 @@ for i in range(num_plots):
     tsne = TSNE(
         n_components=2, 
         verbose=0, 
-        perplexity=safe_perplexity, 
+        perplexity=21, 
         metric='cosine', 
         init='random',
         learning_rate='auto',
@@ -808,18 +808,28 @@ for i in range(num_plots):
         x_coords = tsne_results_batch[indices, 0]
         y_coords = tsne_results_batch[indices, 1]
         
-        # Plot dots
-        ax.scatter(x_coords, y_coords, c=[color], alpha=0.6, s=35)
+        # --- FIX STARTS HERE ---
+        ax.scatter(
+            x_coords, y_coords,
+            color=color,       # Use 'color' instead of 'c=[color]'
+            label=str(class_id),
+            alpha=0.6,
+            s=35,
+            edgecolors='black', # Add a border so light colors (Yellow) are visible
+            linewidth=0.3       # Thin border
+        )
+        # --- FIX ENDS HERE ---
         
         # Plot Centroid Label
-        centroid_x = np.mean(x_coords)
-        centroid_y = np.mean(y_coords)
-        
-        text = ax.text(
-            centroid_x, centroid_y, str(int(class_id)), 
-            fontsize=10, fontweight='bold', ha='center', va='center', color='black'
-        )
-        text.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
+        if len(x_coords) > 0:  # Safety check
+            centroid_x = np.mean(x_coords)
+            centroid_y = np.mean(y_coords)
+            
+            text = ax.text(
+                centroid_x, centroid_y, str(int(class_id)), 
+                fontsize=7, fontweight='bold', ha='center', va='center', color='black'
+            )
+            text.set_path_effects([PathEffects.withStroke(linewidth=1, foreground='white')])
 
     ax.set_title(f't-SNE Visualization - {range_str}', fontsize=16)
     ax.set_xlabel('t-SNE Dim 1')
