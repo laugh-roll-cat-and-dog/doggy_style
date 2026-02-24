@@ -192,6 +192,19 @@ else:
     gallery_dataset = DogDataset('crop_copy', 'gallery', transform=gallery_transforms)
     gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
 
+def build_gallery_centroids(gallery_embeddings, device):
+    centroids = {}
+    for label, emb_list in gallery_embeddings.items():
+        emb_stack = torch.stack(emb_list)
+        centroid = emb_stack.mean(dim=0)
+        centroids[label] = centroid
+
+    centroid_feats = torch.stack(list(centroids.values())).to(device)
+    centroid_feats = F.normalize(centroid_feats, dim=1)
+    centroid_labels = torch.tensor(list(centroids.keys())).to(device)
+
+    return centroid_feats, centroid_labels
+
 def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefix, top_k=5):
     gal_feats = []
     gal_labels = []
@@ -218,20 +231,27 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
     test_labels_true = torch.tensor(test_labels).to(device)
 
     # 1. Compute Similarity Matrix
-    sim_matrix = torch.matmul(test_feats, gal_feats.T)
-    
+    centroid_feats, centroid_labels = build_gallery_centroids(
+        gallery_embeddings, device
+    )
+
+    # ---- Similarity to centroids ----
+    sim_matrix = torch.matmul(test_feats, centroid_feats.T)
+    topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
+    pred_labels = centroid_labels[topk_indices]
 
     eer_thr, far_thr = compute_identification_threshold(
         sim_matrix,
         test_labels_true,
-        gal_labels,
+        centroid_labels,
         output_prefix,
         target_far=0.01
     )
 
+
     # 2. Get Top-K Predictions
-    topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
-    pred_labels = gal_labels[topk_indices]
+    # topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
+    # pred_labels = gal_labels[topk_indices]
 
     top1_scores = topk_scores[:, 0]
 
@@ -250,7 +270,13 @@ def evaluate_embedding_metrics(test_embeddings, gallery_embeddings, output_prefi
     # --- NEW BLOCK: Calculate Max Score for the True Class ---
     # Create a mask where (Test_i, Gal_j) is True if they have the same label
     # Shape: [num_test, num_gallery]
-    label_mask = test_labels_true.unsqueeze(1) == gal_labels.unsqueeze(0)
+    label_mask = test_labels_true.unsqueeze(1) == centroid_labels.unsqueeze(0)
+
+    masked_sim = sim_matrix.clone()
+    masked_sim[~label_mask] = -float('inf')
+
+    true_class_scores = masked_sim.max(dim=1)[0]
+
 
     # Clone matrix to mask out wrong classes without affecting original sim_matrix
     masked_sim = sim_matrix.clone()
@@ -475,30 +501,14 @@ def compute_identification_threshold(
 def evaluate_open_set(
     test_embeddings,
     gallery_embeddings,
-    threshold,          # <-- EER threshold
+    threshold,
     output_prefix,
     device="cuda",
     top_k=5
 ):
-    import pandas as pd
-    import numpy as np
-    import torch
-    import torch.nn.functional as F
-    from sklearn.metrics import roc_curve, auc
-    import matplotlib.pyplot as plt
-
-    # -----------------------------
-    # Prepare gallery
-    # -----------------------------
-    gal_feats, gal_labels = [], []
-
-    for label, emb_list in gallery_embeddings.items():
-        for emb in emb_list:
-            gal_feats.append(emb)
-            gal_labels.append(label)
-
-    gal_feats = F.normalize(torch.stack(gal_feats), dim=1).to(device)
-    gal_labels = torch.tensor(gal_labels).to(device)
+    centroid_feats, centroid_labels = build_gallery_centroids(
+        gallery_embeddings, device
+    )
 
     # -----------------------------
     # Prepare test
@@ -517,11 +527,11 @@ def evaluate_open_set(
     # -----------------------------
     # Similarity
     # -----------------------------
-    sim_matrix = torch.matmul(test_feats, gal_feats.T)
+    sim_matrix = torch.matmul(test_feats, centroid_feats.T)
     topk_scores, topk_indices = torch.topk(sim_matrix, k=top_k, dim=1)
 
     top1_scores = topk_scores[:, 0]
-    pred_labels = gal_labels[topk_indices[:, 0]]
+    pred_labels = centroid_labels[topk_indices[:, 0]]
 
     # Accept / Reject using EER threshold
     accept = top1_scores >= threshold

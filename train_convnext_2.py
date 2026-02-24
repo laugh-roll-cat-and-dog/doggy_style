@@ -1,0 +1,457 @@
+import os
+import pandas as pd
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
+import torchvision.transforms as transforms
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.autograd import Variable
+import argparse
+from sklearn.metrics import accuracy_score
+import matplotlib.pyplot as plt
+from natsort import natsorted
+
+from network.network import Network_ConvNext, Network_Resnet
+
+from loss.arcface import ArcFace
+from loss.softTriple import SoftTriple
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-a', '--attention', default='sb', choices=['s', 'b', 'sb', 'n'], type=str, metavar="attention",
+                    help='attention module')
+parser.add_argument('-b', '--backbone', choices=['dino', 'v2', 'resnet'], type=str, metavar="backbone",
+                    help='backbone')
+parser.add_argument('-o', '--output', type=str, metavar="output",
+                    help='output model filename')
+parser.add_argument('-e', '--epoch', type=int, metavar="epoch",
+                    help='number of epoch')
+parser.add_argument('-c', type=int, metavar="class",
+                    help='number of class')
+parser.add_argument('-l', '--loss', choices=['a', 's', 'as', 'n'], type=str, metavar="loss",
+                    help='loss function')
+parser.add_argument('-d', '--dataset', choices=['face', 'nose', 'nose_old'], type=str, metavar="dataset",
+                    help='what dataset to use')
+args = parser.parse_args()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# print(device)
+
+## Data
+train_transforms_1 = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_2 = transforms.Compose([
+    transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(degrees=10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_3 = transforms.Compose([
+    transforms.RandomRotation(degrees=15),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomAffine(
+        degrees=0,
+        translate=(0.1, 0.1),
+        scale=(0.9, 1.1)
+    ),
+    transforms.RandomResizedCrop(
+        size=(224, 224),
+        scale=(0.9, 1.0),
+        ratio=(0.95, 1.05)
+    ),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_4 = transforms.Compose([
+    transforms.ColorJitter(
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.2,
+        hue=0.05
+    ),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+train_transforms_5 = transforms.Compose([
+    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0)),
+    transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: x + 0.05 * torch.randn_like(x)),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+val_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+if args.dataset == 'face':
+    class DogDataset(Dataset):
+        def __init__(self,csv_file, transform=None):
+            self.df = pd.read_csv(csv_file)
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.df)
+        
+        def __getitem__(self, index):
+            img_path = self.df.loc[index,'filepath']
+            label = self.df.loc[index,'label']
+            img_path_normalized = img_path.replace('\\', '/')
+            image = Image.open(img_path_normalized).convert('RGB')
+
+            if self.transform:
+                image = self.transform(image)
+            
+            return image, label
+    train_dataset_1 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=train_transforms_2)
+    train_dataset_2 = DogDataset(csv_file='train_split_mixed_sorted.csv', transform=val_transforms)
+    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2])
+    val_dataset = DogDataset(csv_file='test_split_mixed_sorted.csv', transform=val_transforms)
+
+else:
+    class DogDataset(Dataset):
+        def __init__(self, root_dir, split="train", transform=None):
+            self.root_dir = root_dir
+            self.split = split
+            self.transform = transform
+            self.samples = []
+
+            for class_name in sorted(os.listdir(root_dir)):
+                class_dir = os.path.join(root_dir, class_name)
+                if not os.path.isdir(class_dir):
+                    continue
+
+                try:
+                    label = int(class_name)
+                    if label >= args.c:
+                        continue
+                except:
+                    continue
+
+                for root, dirs, files in os.walk(class_dir):
+                    if os.path.basename(root) != split:
+                        continue
+
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            self.samples.append((fpath, label))
+
+            if len(self.samples) == 0:
+                raise ValueError(f"No images found for split='{split}' in {root_dir}")
+
+        def __len__(self):
+            return len(self.samples)
+
+        def __getitem__(self, index):
+            img_path, label = self.samples[index]
+            image = Image.open(img_path).convert("RGB")
+
+            if self.transform:
+                image = self.transform(image)
+
+            return image, label
+    train_dataset_1 = DogDataset('crop_copy', transform=train_transforms_3)
+    train_dataset_2 = DogDataset('crop_copy', transform=train_transforms_4)
+    train_dataset_3 = DogDataset('crop_copy', transform=train_transforms_5)
+    train_dataset_4 = DogDataset('crop_copy', transform=val_transforms)
+    train_dataset = ConcatDataset([train_dataset_1, train_dataset_2, train_dataset_3, train_dataset_4])
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=6)
+
+    class DogDataset_eva(Dataset):
+        def __init__(self, root_dir, split="train", transform=None, class_num=45):
+            self.root_dir = root_dir
+            self.split = split
+            self.transform = transform
+            self.samples = []
+
+            if split == 'unknown':
+                unknown_dir = os.path.join(root_dir, 'unknown')
+            
+                if os.path.isdir(unknown_dir):
+                    # Walk specifically inside the 'unknown' folder
+                    for root, dirs, files in os.walk(unknown_dir):
+                        for fname in natsorted(files):
+                            fpath = os.path.join(root, fname)
+                            
+                            # Filter for valid image extensions
+                            if os.path.isfile(fpath) and fname.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                # Assign label -1 for unknown images
+                                self.samples.append((fpath, -1))
+                
+                    # Error handling if empty
+                if len(self.samples) == 0:
+                    print(f"Warning: No images found in '{unknown_dir}'")
+                
+                return
+
+            for class_name in sorted(os.listdir(root_dir)):
+                class_dir = os.path.join(root_dir, class_name)
+                if not os.path.isdir(class_dir):
+                    continue
+
+                try:
+                    label = int(class_name)
+                    if label < 17:
+                        continue
+                except:
+                    continue
+
+                for root, dirs, files in os.walk(class_dir):
+                    if os.path.basename(root) != split:
+                        continue
+
+                    for i, fname in enumerate(natsorted(files)):
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            if split == 'gallery' and i >= 4:
+                                continue
+                            self.samples.append((fpath, label))
+
+
+            if len(self.samples) == 0:
+                raise ValueError(f"No images found for split='{split}' in {root_dir}")
+
+        def __len__(self):
+            return len(self.samples)
+
+        def __getitem__(self, index):
+            img_path, label = self.samples[index]
+            image = Image.open(img_path).convert("RGB")
+
+            if self.transform:
+                image = self.transform(image)
+
+            return image, label
+        
+    val_dataset = DogDataset_eva('crop_copy', 'test', transform=val_transforms)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+
+    val_dataset_unknown = DogDataset_eva('crop_copy', 'unknown', transform=val_transforms, class_num=50)
+    val_loader_unknown = DataLoader(val_dataset_unknown, batch_size=16, shuffle=False)
+
+    gallery_dataset = DogDataset_eva('crop_copy', 'gallery', transform=val_transforms)
+    gallery_loader = DataLoader(gallery_dataset, batch_size=16,shuffle=False)
+
+## Scheduler
+def lr_lambda(epoch):
+    if epoch < args.epoch/2:
+        return 1.0
+    else:
+        return max(0.0, 1.0 - (epoch - (args.epoch/2)) / (args.epoch/2))
+
+def build_gallery_centroids(gallery_embeddings, device):
+    centroids = {}
+    for label, emb_list in gallery_embeddings.items():
+        emb_stack = torch.stack(emb_list)
+        centroid = emb_stack.mean(dim=0)
+        centroids[label] = centroid
+
+    centroid_feats = torch.stack(list(centroids.values())).to(device)
+    centroid_feats = F.normalize(centroid_feats, dim=1)
+    centroid_labels = torch.tensor(list(centroids.keys())).to(device)
+
+    return centroid_feats, centroid_labels
+
+def evaluate_embedding(model, gallery_loader, val_loader, device, top_k=1):
+    model.eval()
+
+    gallery_embeddings = {}
+    test_embeddings = {}
+
+    with torch.no_grad():
+
+        # ---- Extract Gallery Embeddings ----
+        for img, label in gallery_loader:
+            img = img.to(device)
+            emb = model(img)
+
+            for i in range(len(label)):
+                lbl = label[i].item()
+                e = emb[i]
+
+                if lbl not in gallery_embeddings:
+                    gallery_embeddings[lbl] = [e]
+                else:
+                    gallery_embeddings[lbl].append(e)
+
+        # ---- Extract Test Embeddings ----
+        for img, label in val_loader:
+            img = img.to(device)
+            emb = model(img)
+
+            for i in range(len(label)):
+                lbl = label[i].item()
+                e = emb[i]
+
+                if lbl not in test_embeddings:
+                    test_embeddings[lbl] = [e]
+                else:
+                    test_embeddings[lbl].append(e)
+
+    centroid_feats, centroid_labels = build_gallery_centroids(
+        gallery_embeddings, device
+    )
+
+    correct = 0
+    total = 0
+
+    # ---- Evaluate using centroid similarity ----
+    for lbl, emb_list in test_embeddings.items():
+        for e in emb_list:
+
+            # Normalize test embedding
+            e = F.normalize(e.unsqueeze(0), dim=1)
+
+            # Cosine similarity to ALL centroids
+            sim = torch.matmul(e, centroid_feats.T)
+
+            # Top-K over class centroids
+            topk = torch.topk(sim, k=top_k, dim=1)
+
+            pred_label = centroid_labels[topk.indices[0][0]]
+
+            if pred_label.item() == lbl:
+                correct += 1
+
+            total += 1
+
+    acc = correct / total
+    return acc
+
+
+## Train
+def train():
+    if args.backbone == 'resnet':
+        model = Network_Resnet(args.attention).to(device)
+    else:
+        model = Network_ConvNext(args.backbone, args.attention).to(device)
+
+    arcface_loss, soft_triple_loss_1, soft_triple_loss_2, soft_triple_loss_3 = None, None, None, None
+    if 'a' in args.loss:
+        arcface_loss = ArcFace(1024, int(args.c)).to(device)
+    if 's' in args.loss:
+        soft_triple_loss_1 = SoftTriple(8, 0.1, 0.1, 0.03, 1024, int(args.c), 2).to(device)
+        soft_triple_loss_2 = SoftTriple(10, 0.1, 0.1, 0.02, 1024, int(args.c), 2).to(device)
+        soft_triple_loss_3 = SoftTriple(12, 0.1, 0.1, 0.01, 1024, int(args.c), 2).to(device)
+
+    ce_loss = nn.CrossEntropyLoss()
+
+    param_groups = [{"params": model.parameters()}]
+    if arcface_loss is not None:
+        param_groups.append({"params": arcface_loss.parameters()})
+    if soft_triple_loss_1 is not None:
+        param_groups.append({"params": soft_triple_loss_1.parameters()})
+        param_groups.append({"params": soft_triple_loss_2.parameters()})
+        param_groups.append({"params": soft_triple_loss_3.parameters()})
+    optimizer = AdamW(param_groups, lr=3.5e-5, weight_decay=1e-4)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    num_epochs = args.epoch
+
+    train_acc_list = []
+    val_acc_list = []
+
+
+    for epoch in range(num_epochs):
+        model.train()
+        if 'a' in args.loss:
+            arcface_loss.train()
+        if 's' in args.loss:
+            soft_triple_loss_1.train()
+            soft_triple_loss_2.train()
+            soft_triple_loss_3.train()
+        training_loss = 0
+        correct, total = 0, 0
+
+        for img, dog_id in train_loader:
+            img_set = Variable(img.to(device))
+            id_set = Variable(dog_id.to(device))
+
+            output = model(img_set)
+
+            loss = 0
+            combined_logits = 0.0
+            if 'a' in args.loss:
+                logits_a = arcface_loss(output, id_set)
+                #print(logits_a)
+                loss_a = ce_loss(logits_a, id_set)
+                loss += loss_a
+                if 's' not in args.loss:
+                    combined_logits += torch.softmax(logits_a, dim=1)
+            if 's' in args.loss:
+                logits_s_1 = soft_triple_loss_1(output)
+                loss_s_1 = soft_triple_loss_1.loss(logits_s_1, id_set)
+                logits_s_2 = soft_triple_loss_2(output)
+                loss_s_2 = soft_triple_loss_2.loss(logits_s_2, id_set)
+                logits_s_3 = soft_triple_loss_3(output)
+                loss_s_3 = soft_triple_loss_3.loss(logits_s_3, id_set)
+                loss += loss_s_1 + loss_s_2 + loss_s_3
+                logits_s = logits_s_1 + logits_s_2 + logits_s_3
+                combined_logits += torch.softmax(logits_s, dim=1)
+            else:
+                loss = ce_loss(output, id_set)
+                combined_logits = torch.softmax(output, dim=1)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            training_loss += loss.item()
+
+            preds = torch.argmax(combined_logits, dim=1).to(torch.device("cpu"))
+            # print(preds[:10], id_set[:10])
+            correct += (preds == dog_id).sum().item()
+            total += dog_id.size(0)
+
+        train_acc = correct / total
+        print(f"Epoch [{epoch+1}/{num_epochs}] Train Loss: {training_loss/len(train_loader):.4f}, Train Acc: {train_acc * 100:.4f}")
+        # Embedding-based validation
+        val_acc_embed = evaluate_embedding(model, train_loader, val_loader, device)
+
+        train_acc_list.append(train_acc)
+        val_acc_list.append(val_acc_embed)
+
+        print(f"Epoch [{epoch+1}/{num_epochs}]")
+        print(f"Train Acc (logits)     : {train_acc*100:.2f}%")
+        print(f"Val Acc (embedding NN) : {val_acc_embed*100:.2f}%")
+
+
+        scheduler.step()
+
+    torch.save(model.state_dict(), f"{args.output}.pt")
+    if arcface_loss is not None:
+        torch.save(arcface_loss.state_dict(), f"{args.output}_arcface.pt")
+    if soft_triple_loss_1 is not None:
+        torch.save(soft_triple_loss_1.state_dict(), f"{args.output}_soft_ensemble_1.pt")
+        torch.save(soft_triple_loss_2.state_dict(), f"{args.output}_soft_ensemble_2.pt")
+        torch.save(soft_triple_loss_3.state_dict(), f"{args.output}_soft_ensemble_3.pt")
+
+    plt.figure()
+    plt.plot(train_acc_list, label="Train Accuracy")
+    plt.plot(val_acc_list, label="Validation Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{args.output}_accuracy_curve.png")
+    plt.close()
+
+train()
