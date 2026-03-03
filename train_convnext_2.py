@@ -274,7 +274,8 @@ def evaluate_embedding(model, gallery_loader, val_loader, device, top_k=1):
     model.eval()
 
     gallery_embeddings = {}
-    test_embeddings = {}
+    test_feats = []
+    test_labels = []
 
     with torch.no_grad():
 
@@ -297,43 +298,27 @@ def evaluate_embedding(model, gallery_loader, val_loader, device, top_k=1):
             img = img.to(device)
             emb = model(img)
 
-            for i in range(len(label)):
-                lbl = label[i].item()
-                e = emb[i]
+            test_feats.append(emb)
+            test_labels.append(label)
 
-                if lbl not in test_embeddings:
-                    test_embeddings[lbl] = [e]
-                else:
-                    test_embeddings[lbl].append(e)
+    # Stack test
+    test_feats = torch.cat(test_feats, dim=0)
+    test_feats = F.normalize(test_feats, dim=1)
+    test_labels = torch.cat(test_labels).to(device)
 
+    # Build centroids
     centroid_feats, centroid_labels = build_gallery_centroids(
         gallery_embeddings, device
     )
 
-    correct = 0
-    total = 0
+    # Cosine similarity (vectorized)
+    sim = torch.matmul(test_feats, centroid_feats.T)
 
-    # ---- Evaluate using centroid similarity ----
-    for lbl, emb_list in test_embeddings.items():
-        for e in emb_list:
+    topk = torch.topk(sim, k=top_k, dim=1)
+    preds = centroid_labels[topk.indices[:, 0]]
 
-            # Normalize test embedding
-            e = F.normalize(e.unsqueeze(0), dim=1)
+    acc = (preds == test_labels).float().mean().item()
 
-            # Cosine similarity to ALL centroids
-            sim = torch.matmul(e, centroid_feats.T)
-
-            # Top-K over class centroids
-            topk = torch.topk(sim, k=top_k, dim=1)
-
-            pred_label = centroid_labels[topk.indices[0][0]]
-
-            if pred_label.item() == lbl:
-                correct += 1
-
-            total += 1
-
-    acc = correct / total
     return acc
 
 
@@ -423,8 +408,8 @@ def train():
 
         train_acc = correct / total
         print(f"Epoch [{epoch+1}/{num_epochs}] Train Loss: {training_loss/len(train_loader):.4f}, Train Acc: {train_acc * 100:.4f}")
-        # Embedding-based validation
-        val_acc_embed = evaluate_embedding(model, train_loader, val_loader, device)
+        
+        val_acc_embed = evaluate_embedding(model, gallery_loader, val_loader, device)
 
         train_acc_list.append(train_acc)
         val_acc_list.append(val_acc_embed)
@@ -432,7 +417,6 @@ def train():
         print(f"Epoch [{epoch+1}/{num_epochs}]")
         print(f"Train Acc (logits)     : {train_acc*100:.2f}%")
         print(f"Val Acc (embedding NN) : {val_acc_embed*100:.2f}%")
-
 
         scheduler.step()
 
