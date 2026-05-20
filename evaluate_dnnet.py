@@ -626,12 +626,131 @@ def evaluate_open_set(
     return summary, df
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import torch.nn as nn
+import torchvision.models as models
+class ResNet152_Backbone(nn.Module):
+    def __init__(self):
+        super(ResNet152_Backbone, self).__init__()
+
+        resnet = models.resnet152()
+
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
+
+        self.extra_layers = nn.Sequential(
+            nn.Conv2d(2048, 1024, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(1024, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x = self.backbone(x)
+        x = self.extra_layers(x)
+        return x
+
+
+class PositionAttentionModule(nn.Module):
+    ''' self-attention '''
+
+    def __init__(self, in_channels):
+        super().__init__()
+        self.query_conv = nn.Conv2d(
+            in_channels, in_channels // 8, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        query = self.query_conv(x).view(
+            N, -1, H*W).permute(0, 2, 1)
+        key = self.key_conv(x).view(N, -1, H*W)
+
+        energy = torch.bmm(query, key)
+        attention = self.softmax(energy)
+
+        value = self.value_conv(x).view(N, -1, H*W)
+
+        out = torch.bmm(value, attention.permute(0, 2, 1))
+        out = out.view(N, C, H, W)
+        out = self.gamma*out + x
+        return out
+
+
+class ChannelAttentionModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        query = x.view(N, C, -1)
+        key = x.view(N, C, -1).permute(0, 2, 1)
+
+        energy = torch.bmm(query, key)
+        energy = torch.max(
+            energy, -1, keepdim=True)[0].expand_as(energy) - energy
+        attention = self.softmax(energy)
+
+        value = x.view(N, C, -1)
+
+        out = torch.bmm(attention, value)
+        out = out.view(N, C, H, W)
+        out = self.gamma*out + x
+        return out
+
+
+class DualAttentionModule(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.pam = PositionAttentionModule(in_channels)
+        self.cam = ChannelAttentionModule()
+
+    def forward(self, x):
+        pam_out = self.pam(x)
+        cam_out = self.cam(x)
+
+        out = torch.cat([cam_out, pam_out, x], dim=1)
+        return out
+
+
+class Res152Network(nn.Module):
+    def __init__(self, embedding_dim=1024):
+        super().__init__()
+        self.feature_extractor = ResNet152_Backbone()
+        self.dam = DualAttentionModule(in_channels=512)
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.fc = nn.Linear(3*512, embedding_dim, bias=False)
+        self.bn = nn.BatchNorm1d(embedding_dim)
+
+    def embed(self, x):
+        x = self.feature_extractor(x)
+        x = self.dam(x)
+        x = self.gap(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        x = self.bn(x)
+
+        x = F.normalize(x, p=2, dim=1)
+        return x
+
+    def forward(self, img1):
+        emb1 = self.embed(img1)
+        # emb2 = self.embed(img2)
+        return emb1
 
 if args.backbone == 'resnet':
-    model = Network_Resnet(args.attention).to(device)
+    model = Res152Network().to(device)
 else:
     model = Network_ConvNext(args.backbone, args.attention).to(device)
-model.load_state_dict(torch.load(f"model/model/{args.backbone}/{args.model}.pt", map_location=device))
+model.load_state_dict(torch.load(f"model/dnnet/DNNet+Arc_Conloss.pt", map_location=device))
 model.eval()
 
 result = []
